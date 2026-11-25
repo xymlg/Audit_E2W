@@ -15,7 +15,7 @@ from docx.shared import Inches, Pt, RGBColor
 from helpers import ws_dir
 from wesync import api
 from wesync.errors import SyncError
-from wesync.report_format import _document_snapshot
+from wesync.report_format import DEFAULT_SCOPE, _document_snapshot
 
 
 def _heading(doc, text, level=1):
@@ -145,6 +145,109 @@ def test_format_apply_preserves_content_and_creates_copy():
     assert any(paragraph.text == "横向页正文保持不变。" for paragraph in formatted.paragraphs)
     assert formatted.sections[-1].orientation == WD_ORIENT.LANDSCAPE
     assert formatted.tables[0].cell(1, 1).paragraphs[0].runs[0].font.size == Pt(6.5)
+
+
+def _scope(**changes):
+    result = dict(DEFAULT_SCOPE)
+    result.update(changes)
+    return result
+
+
+def test_format_scope_table_text_does_not_change_paragraphs_or_emphasis():
+    d = ws_dir("format_scope_table_text")
+    template = _template(d / "样板.docx")
+    target = _messy(d / "乱版.docx")
+    output = d / "仅表格字体.docx"
+    scope = _scope(cover=False, headings=False, statement=False, body=False, table_text=True, table_emphasis=False)
+    preview = api.scan_report_format(target, template, scope=scope)
+    assert preview["totals"]["selected_paragraphs"] == 0
+    assert preview["totals"]["tables"] == 1
+    assert all(not role["selected"] for role in preview["roles"])
+
+    result = api.run_report_format(target, template, output=output, scope=scope)
+    source_doc = Document(str(target))
+    formatted = Document(str(output))
+    source_body = next(p for p in source_doc.paragraphs if "保留文字和审计痕迹" in p.text)
+    output_body = next(p for p in formatted.paragraphs if "保留文字和审计痕迹" in p.text)
+    assert output_body._p.xml == source_body._p.xml
+    assert formatted.tables[0].cell(0, 0).paragraphs[0].alignment == source_doc.tables[0].cell(0, 0).paragraphs[0].alignment
+    assert formatted.tables[0].cell(1, 1).paragraphs[0].runs[0].font.size == Pt(6.5)
+    assert formatted.tables[0].cell(2, 1).paragraphs[0].runs[0].font.size == Pt(9)
+    assert not formatted.tables[0].cell(0, 0).paragraphs[0].runs[0].font.bold
+    assert result["counts"]["skipped_paragraphs"] == result["totals"]["paragraphs"]
+    assert "body" not in result["counts"]
+
+
+def test_format_scope_body_does_not_change_tables():
+    d = ws_dir("format_scope_body")
+    template = _template(d / "样板.docx")
+    target = _messy(d / "乱版.docx")
+    output = d / "仅正文.docx"
+    scope = _scope(cover=False, headings=False, statement=False, body=True, table_text=False, table_emphasis=False)
+    result = api.run_report_format(target, template, output=output, scope=scope)
+    source_doc = Document(str(target))
+    formatted = Document(str(output))
+    output_body = next(p for p in formatted.paragraphs if "横向页正文" in p.text)
+    assert output_body.runs[0].font.size == Pt(10.5)
+    assert formatted.tables[0]._tbl.xml == source_doc.tables[0]._tbl.xml
+    assert result["counts"]["body"] > 0
+    assert result["counts"]["skipped_tables"] == 1
+    assert result["counts"]["table_paragraphs"] == 0
+
+
+def test_format_scope_table_emphasis_does_not_change_fonts_or_sizes():
+    d = ws_dir("format_scope_emphasis")
+    template = _template(d / "样板.docx")
+    target = _messy(d / "乱版.docx")
+    output = d / "仅表格强调.docx"
+    scope = _scope(cover=False, headings=False, statement=False, body=False, table_text=False, table_emphasis=True)
+    api.run_report_format(target, template, output=output, scope=scope)
+    source_doc = Document(str(target))
+    formatted = Document(str(output))
+    for row in range(3):
+        for col in range(2):
+            before = source_doc.tables[0].cell(row, col).paragraphs[0]
+            after = formatted.tables[0].cell(row, col).paragraphs[0]
+            assert [run.font.size for run in after.runs] == [run.font.size for run in before.runs]
+            assert [run.font.name for run in after.runs] == [run.font.name for run in before.runs]
+    assert formatted.tables[0].cell(0, 0).paragraphs[0].alignment == 1
+    assert formatted.tables[0].cell(0, 0).paragraphs[0].runs[0].font.bold is True
+    assert formatted.tables[0].cell(1, 1).paragraphs[0].alignment == 2
+    assert formatted.tables[0].cell(2, 0).paragraphs[0].runs[0].font.bold is True
+
+
+def test_format_scope_preserves_abnormal_outline_paragraph():
+    d = ws_dir("format_scope_protected")
+    template = _template(d / "样板.docx")
+    target = _messy(d / "乱版.docx")
+    source_doc = Document(str(target))
+    protected = next(p for p in source_doc.paragraphs if "保留文字和审计痕迹" in p.text)
+    outline = OxmlElement("w:outlineLvl")
+    outline.set(qn("w:val"), "9")
+    protected._p.get_or_add_pPr().append(outline)
+    source_doc.save(str(target))
+    protected_xml = protected._p.xml
+    output = d / "保护异常段落.docx"
+    result = api.run_report_format(target, template, output=output)
+    formatted = Document(str(output))
+    output_protected = next(p for p in formatted.paragraphs if "保留文字和审计痕迹" in p.text)
+    assert output_protected._p.xml == protected_xml
+    assert result["totals"]["protected_paragraphs"] == 1
+    assert result["counts"]["protected_paragraphs"] == 1
+
+
+@pytest.mark.parametrize("scope", [
+    {},
+    {**DEFAULT_SCOPE, "unknown": True},
+    {**DEFAULT_SCOPE, "body": 1},
+    {key: False for key in DEFAULT_SCOPE},
+])
+def test_format_scope_rejects_invalid_selection(scope):
+    d = ws_dir("format_scope_invalid")
+    template = _template(d / "样板.docx")
+    target = _messy(d / "乱版.docx")
+    with pytest.raises(SyncError, match="调整项目|至少选择"):
+        api.scan_report_format(target, template, scope=scope)
 
 
 def test_format_apply_rejects_existing_output_and_same_file():

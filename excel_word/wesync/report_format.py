@@ -84,6 +84,22 @@ ROLE_LABELS = {
     "table_data": "表格数据",
 }
 
+SCOPE_LABELS = {
+    "cover": "封面与目录",
+    "headings": "一至四级标题",
+    "statement": "报表名称、日期与表格标题",
+    "body": "正文段落",
+    "table_text": "表格字体与字号",
+    "table_emphasis": "表格对齐、表头与合计行加粗",
+}
+DEFAULT_SCOPE = {key: True for key in SCOPE_LABELS}
+PARAGRAPH_SCOPE_ROLES = {
+    "cover": ("cover_title", "cover_info", "toc_title", "toc_entry"),
+    "headings": ("heading_1", "heading_2", "heading_3", "heading_4"),
+    "statement": ("statement", "table_title"),
+    "body": ("body",),
+}
+
 ALIGN_VALUES = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
     "center": WD_ALIGN_PARAGRAPH.CENTER,
@@ -130,6 +146,27 @@ def _profiles_dir() -> Path:
     path = project_root() / "format_profiles"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def _validated_scope(scope: dict | None) -> dict[str, bool]:
+    if scope is None:
+        return dict(DEFAULT_SCOPE)
+    if not isinstance(scope, dict) or set(scope) != set(DEFAULT_SCOPE):
+        raise SyncError("调整项目必须完整包含六项，且不能包含未知项目")
+    if any(type(scope[key]) is not bool for key in DEFAULT_SCOPE):
+        raise SyncError("调整项目的选择必须为“是”或“否”")
+    if not any(scope.values()):
+        raise SyncError("请至少选择一项需要调整的项目")
+    return {key: scope[key] for key in DEFAULT_SCOPE}
+
+
+def _selected_paragraph_roles(scope: dict[str, bool]) -> set[str]:
+    return {
+        role
+        for key, enabled in scope.items()
+        if enabled and key in PARAGRAPH_SCOPE_ROLES
+        for role in PARAGRAPH_SCOPE_ROLES[key]
+    }
 
 
 def _profile_path(name: str) -> Path:
@@ -658,7 +695,11 @@ def _looks_numeric(text: str) -> bool:
     return bool(re.fullmatch(r"[￥¥$]?-?\d[\d,]*(?:\.\d+)?%?\)?", value))
 
 
-def _apply_table_format(table: Table, profile: FormatProfile) -> tuple[int, Counter]:
+def _apply_table_format(table: Table, profile: FormatProfile, scope: dict[str, bool]) -> tuple[int, Counter]:
+    apply_text = scope["table_text"]
+    apply_emphasis = scope["table_emphasis"]
+    if not apply_text and not apply_emphasis:
+        return 0, Counter()
     base = ParagraphFormat(profile.table_ascii_font, profile.table_east_asia_font, profile.table_size, None)
     formatted = 0
     roles = _table_row_roles(table)
@@ -668,32 +709,54 @@ def _apply_table_format(table: Table, profile: FormatProfile) -> tuple[int, Coun
             for paragraph in cell.paragraphs:
                 if not paragraph.text.strip():
                     continue
-                align = "center" if role == "table_header" else ("right" if _looks_numeric(paragraph.text) else "left")
-                paragraph.alignment = ALIGN_VALUES[align]
-                bold = True if role in ("table_header", "table_total") else None
+                if apply_emphasis:
+                    align = "center" if role == "table_header" else ("right" if _looks_numeric(paragraph.text) else "left")
+                    paragraph.alignment = ALIGN_VALUES[align]
                 for run in _paragraph_runs(paragraph):
+                    if not apply_text:
+                        if role in ("table_header", "table_total"):
+                            run.font.bold = True
+                        continue
                     current_size = _effective_run_size(paragraph, run)
                     size = min(current_size, profile.table_size) if current_size is not None else profile.table_size
+                    bold = True if apply_emphasis and role in ("table_header", "table_total") else None
                     _set_run_font(run, base, size=size, bold=bold)
                 formatted += 1
     return formatted, Counter(roles)
 
 
-def _apply_profile(doc, profile: FormatProfile) -> dict[str, int]:
+def _apply_profile(doc, profile: FormatProfile, scope: dict[str, bool]) -> dict[str, int]:
     counts: Counter[str] = Counter()
+    selected_roles = _selected_paragraph_roles(scope)
     classified, meta = _classify_paragraphs(doc)
+    skipped_paragraphs = 0
+    protected_paragraphs = 0
     for paragraph, role in classified:
+        if (_outline_level(paragraph) or 0) > 4:
+            protected_paragraphs += 1
+            continue
+        if role not in selected_roles:
+            skipped_paragraphs += 1
+            continue
         fmt = profile.paragraphs.get(role) or profile.paragraphs["body"]
         _apply_paragraph_format(paragraph, fmt)
         counts[role] += 1
     table_paragraphs = 0
+    skipped_tables = 0
+    table_enabled = scope["table_text"] or scope["table_emphasis"]
     for table in doc.tables:
-        formatted, roles = _apply_table_format(table, profile)
+        if not table_enabled:
+            skipped_tables += 1
+            continue
+        formatted, roles = _apply_table_format(table, profile, scope)
         table_paragraphs += formatted
         counts.update(roles)
     counts["table_paragraphs"] = table_paragraphs
     counts["ambiguous"] = meta["ambiguous"]
     counts["empty"] = meta["empty"]
+    counts["protected_paragraphs"] = protected_paragraphs
+    counts["skipped_paragraphs"] = skipped_paragraphs
+    counts["skipped_tables"] = skipped_tables
     return dict(counts)
 
 
@@ -755,19 +818,32 @@ def _format_source(source: Path, template: str | Path | None, profile_name: str 
     return build_profile(path), str(path), False
 
 
-def _scan_opened_report(source: Path, template_label: str, profile: FormatProfile, target, self_sample: bool = False) -> dict:
+def _scan_opened_report(source: Path, template_label: str, profile: FormatProfile, target, self_sample: bool = False, scope: dict[str, bool] | None = None) -> dict:
+    scope = _validated_scope(scope)
+    selected_roles = _selected_paragraph_roles(scope)
     classified, meta = _classify_paragraphs(target)
     counts = Counter(role for _, role in classified)
+    protected_roles = Counter(role for paragraph, role in classified if (_outline_level(paragraph) or 0) > 4)
+    protected = sum(protected_roles.values())
+    selected_paragraphs = sum(counts[role] - protected_roles[role] for role in selected_roles)
     roles = []
     for role in ROLE_LABELS:
         if role in ("table_header", "table_total", "table_data"):
             continue
         if counts[role]:
-            roles.append({"role": role, "label": ROLE_LABELS[role], "paragraphs": counts[role], "format": _format_summary(profile.paragraphs[role])})
-    table_rows = sum(len(table.rows) for table in target.tables)
+            roles.append({
+                "role": role,
+                "label": ROLE_LABELS[role],
+                "paragraphs": counts[role],
+                "selected_paragraphs": counts[role] - protected_roles[role] if role in selected_roles else 0,
+                "selected": role in selected_roles and counts[role] > protected_roles[role],
+                "format": _format_summary(profile.paragraphs[role]),
+            })
+    table_enabled = scope["table_text"] or scope["table_emphasis"]
+    table_rows = sum(len(table.rows) for table in target.tables) if table_enabled else 0
     warnings = []
     if meta["ambiguous"]:
-        warnings.append(f"有 {meta['ambiguous']} 个大纲级别异常的段落按正文保留，未误判为标题。")
+        warnings.append(f"有 {meta['ambiguous']} 个大纲级别异常的段落保持原样，不会强行套用格式。")
     if source.suffix.lower() == ".docm":
         warnings.append("将校验 Word 宏（VBA）是否完整保留。")
     if self_sample:
@@ -776,12 +852,17 @@ def _scan_opened_report(source: Path, template_label: str, profile: FormatProfil
         "source": str(source),
         "template": template_label,
         "suggested_output": str(_suggested_output(source)),
+        "scope": dict(scope),
         "totals": {
             "paragraphs": len(classified),
-            "tables": len(target.tables),
+            "tables": len(target.tables) if table_enabled else 0,
             "table_rows": table_rows,
             "empty_paragraphs": meta["empty"],
             "ambiguous_paragraphs": meta["ambiguous"],
+            "selected_paragraphs": selected_paragraphs,
+            "protected_paragraphs": protected,
+            "skipped_paragraphs": len(classified) - selected_paragraphs - protected,
+            "skipped_tables": 0 if table_enabled else len(target.tables),
         },
         "roles": roles,
         "table_format": _format_summary(ParagraphFormat(profile.table_ascii_font, profile.table_east_asia_font, profile.table_size, None)),
@@ -795,11 +876,13 @@ def scan_report_format(
     template: str | Path | None = None,
     *,
     profile_name: str | None = None,
+    scope: dict | None = None,
 ) -> dict:
+    scope = _validated_scope(scope)
     source = resolve_docx(str(docx))
     profile, template_label, self_sample = _format_source(source, template, profile_name)
     target = _open_document(source)
-    return _scan_opened_report(source, template_label, profile, target, self_sample)
+    return _scan_opened_report(source, template_label, profile, target, self_sample, scope)
 
 
 def run_report_format(
@@ -809,7 +892,9 @@ def run_report_format(
     output: str | Path | None = None,
     dry_run: bool = False,
     profile_name: str | None = None,
+    scope: dict | None = None,
 ) -> dict:
+    scope = _validated_scope(scope)
     source = resolve_docx(str(docx))
     output_path = _suggested_output(source) if output is None else Path(output).expanduser().resolve()
     if output_path.suffix.lower() != source.suffix.lower():
@@ -822,17 +907,17 @@ def run_report_format(
         raise SyncError(f"输出文件已存在，未覆盖：{output_path}")
     profile, template_label, self_sample = _format_source(source, template, profile_name)
     target = _open_document(source)
-    result = _scan_opened_report(source, template_label, profile, target, self_sample)
+    result = _scan_opened_report(source, template_label, profile, target, self_sample, scope)
     result["output"] = str(output_path)
     result["dry_run"] = bool(dry_run)
     log(f"[格式] 格式来源：{template_label}")
-    log(f"[格式] 待调整：{source.name}（{result['totals']['paragraphs']} 段、{result['totals']['tables']} 张表）")
+    log(f"[格式] 待调整：{source.name}（处理 {result['totals']['selected_paragraphs']} 段、{result['totals']['tables']} 张表）")
     if dry_run:
         log(f"[格式] 预演完成，未写入文件；计划输出：{output_path.name}")
         return result
 
     before = _document_snapshot(target)
-    counts = _apply_profile(target, profile)
+    counts = _apply_profile(target, profile, scope)
     fd, temp_name = tempfile.mkstemp(prefix=f".{output_path.stem}.", suffix=output_path.suffix, dir=output_path.parent)
     os.close(fd)
     staged = Path(temp_name)

@@ -726,11 +726,12 @@ def scan_report_format(
     template: str | Path | None = None,
     *,
     profile_name: str | None = None,
+    scope: dict | None = None,
 ) -> dict:
     """只读扫描格式调整方案：按样板或已存纯格式方案预演，不写任何文件。"""
     from .report_format import scan_report_format as scan
 
-    return scan(docx, template, profile_name=profile_name)
+    return scan(docx, template, profile_name=profile_name, scope=scope)
 
 
 def run_report_format(
@@ -740,11 +741,12 @@ def run_report_format(
     output: str | Path | None = None,
     dry_run: bool = False,
     profile_name: str | None = None,
+    scope: dict | None = None,
 ) -> dict:
     """按样板或已存纯格式方案生成副本；默认不覆盖原报告，也不改写原文件。"""
     from .report_format import run_report_format as run
 
-    return run(docx, template, output=output, dry_run=dry_run, profile_name=profile_name)
+    return run(docx, template, output=output, dry_run=dry_run, profile_name=profile_name, scope=scope)
 
 
 def list_format_profiles() -> list[dict]:

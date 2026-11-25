@@ -406,3 +406,100 @@ def test_g14_saved_format_profile_gui_flow(win, qapp, monkeypatch):
     check("删除前有确认", len(confirmations) == 1, str(confirmations))
     check("方案已从下拉删除", page.profile_combo.findData("GUI方案") < 0)
     check("删除后回到样板模式", page.profile_combo.currentData() in (None, ""))
+
+
+def test_g15_format_scope_tab_invalidates_preview_and_limits_apply(win, qapp, monkeypatch):
+    from docx.shared import Pt
+    from wesync.report_format import DEFAULT_SCOPE
+
+    errors = []
+    monkeypatch.setattr(win.ctx, "error", lambda *args, **kwargs: errors.append(args))
+    d = ws_dir("g15")
+    template_doc = Document()
+    template_doc.add_paragraph("审计报告")
+    template_doc.add_paragraph("目录")
+    template_doc.add_paragraph("一、审计意见", style="Heading 1")
+    template_table = template_doc.add_table(rows=2, cols=2)
+    template_table.cell(0, 0).text = "项目"
+    template_table.cell(1, 0).text = "A"
+    template_table.cell(1, 1).text = "100"
+    for row in template_table.rows:
+        for cell in row.cells:
+            for run in cell.paragraphs[0].runs:
+                run.font.size = Pt(8)
+    template_body = template_doc.add_paragraph("样板正文")
+    template_body.runs[0].font.size = Pt(14)
+    template = d / "样板.docx"
+    template_doc.save(str(template))
+
+    target_doc = Document()
+    target_doc.add_paragraph("乱版报告")
+    target_doc.add_paragraph("目录")
+    target_doc.add_paragraph("一、审计意见", style="Heading 1")
+    target_table = target_doc.add_table(rows=2, cols=2)
+    target_table.cell(0, 0).text = "项目"
+    target_table.cell(1, 0).text = "A"
+    target_table.cell(1, 1).text = "100"
+    target_body = target_doc.add_paragraph("未选择时保持原样的正文")
+    target_body.runs[0].font.size = Pt(30)
+    target = d / "乱版.docx"
+    target_doc.save(str(target))
+
+    page = win._pages["FormatPage"]
+    for button in page.scope_buttons.values():
+        button.setChecked(True)
+    check("格式页恰有两个Tab", page.tabs.count() == 2, str(page.tabs.count()))
+    check("第二个Tab为调整项目", page.tabs.tabText(1) == "调整项目", page.tabs.tabText(1))
+    check("六项默认全部勾选", set(page.scope_buttons) == set(DEFAULT_SCOPE)
+          and all(button.isChecked() for button in page.scope_buttons.values()), str(page._scope()))
+
+    win.set_docx(target)
+    page.on_show()
+    page.template_edit.setText(str(template))
+    page._start_scan()
+    check("默认范围预演完成", wait_idle(qapp, win))
+    page._check_done()
+    check("默认范围可生成", page.apply_button.isEnabled())
+    for key in ("cover", "headings", "statement", "body"):
+        page.scope_buttons[key].setChecked(False)
+    check("改变范围使旧预演失效", not page.apply_button.isEnabled() and page._result is None)
+    page._start_apply()
+    check("旧预演不能直接生成", any(args[0] == "尚未预演" for args in errors), str(errors))
+
+    output = d / "仅表格.docx"
+    page.output_edit.setText(str(output))
+    page._start_scan()
+    check("仅表格预演完成", wait_idle(qapp, win))
+    page._check_done()
+    details = page.details.toPlainText()
+    check("预演显示未选正文", "将处理 0 个非空段落、1 张表" in details and "未选项目跳过" in details, details)
+    page._start_apply()
+    check("仅表格生成完成", wait_idle(qapp, win))
+    page._check_done()
+    formatted = Document(str(output))
+    formatted_body = next(p for p in formatted.paragraphs if "未选择时保持原样" in p.text)
+    check("取消正文后正文保持原样", formatted_body.runs[0].font.size == Pt(30))
+    check("仍调整所选表格", formatted.tables[0].cell(1, 1).paragraphs[0].runs[0].font.size == Pt(8))
+
+    page.scope_buttons["body"].setChecked(True)
+    check("恢复正文后需重新预演", not page.apply_button.isEnabled())
+    second_output = d / "正文与表格.docx"
+    page.output_edit.setText(str(second_output))
+    page._start_scan()
+    check("恢复正文后预演完成", wait_idle(qapp, win))
+    page._check_done()
+    page._start_apply()
+    check("恢复正文后生成完成", wait_idle(qapp, win))
+    page._check_done()
+    formatted = Document(str(second_output))
+    formatted_body = next(p for p in formatted.paragraphs if "未选择时保持原样" in p.text)
+    check("恢复正文后应用样板正文格式", formatted_body.runs[0].font.size == Pt(14))
+
+    page._start_scan()
+    page.scope_buttons["body"].setChecked(False)
+    check("预演中改变选择任务已启动", wait_idle(qapp, win))
+    page._check_done()
+    check("预演中改变选择不启用旧结果", not page.apply_button.isEnabled()
+          and page.status_label.text().startswith("格式来源或调整项目已变化"), page.status_label.text())
+    for button in page.scope_buttons.values():
+        button.setChecked(True)
