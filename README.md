@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | Windows 图形界面 | 直接手工操作 | Python 源码环境，或已构建的 Windows 程序 |
 | Qoder 插件 | 在 Qoder 中用自然语言指挥 Agent，并提供操作界面 | Qoder Desktop、Windows 版引擎 |
-| DSH 完整插件 | 在 DSH 中用自然语言指挥 Agent | DSH、Node.js 24.11+、Python 3.12+ |
+| DSH 完整插件 | 在 DSH 中用自然语言指挥 Agent | DSH、Node.js 24.11+、pnpm 10+、Python 3.12+ |
 | WorkBuddy / DSH Skill | 只安装工作流说明，由 Agent 调用本机执行脚本 | 对应 Agent、Windows 版引擎 |
 
 ### 1. 源码运行
@@ -75,6 +75,21 @@ py -3.12 -m venv .venv
 ```
 
 可通过 `AUDIT_TOOLBOX_PYTHON` 指定解释器的绝对路径。插件与引擎版本不一致时会拒绝执行，不会静默降级。
+
+安装到 DSH profile（Windows）：
+
+```powershell
+npm install -g pnpm@10
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install python-docx==1.2.0 openpyxl==3.1.5 lxml==6.1.1
+$env:AUDIT_TOOLBOX_PYTHON = (Resolve-Path .\.venv\Scripts\python.exe).Path
+
+dsh plugin --profile desktop add github:xymlg/Audit_E2W
+dsh --profile desktop --dump-config
+dsh --profile desktop
+```
+
+`desktop` 可替换为实际 profile 名；`--dump-config` 应显示 `audit-e2w` 配置层。GitHub 安装的是纯 JavaScript 发布入口，不需要构建脚本授权。生产环境建议把安装地址锁定到具体提交，例如 `github:xymlg/Audit_E2W#<commit-sha>`。
 
 开发和打包检查：
 
