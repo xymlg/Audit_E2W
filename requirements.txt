@@ -1,0 +1,15 @@
+# 审计工具箱（audit_tools）版本参考（pip 兼容）
+# 依赖现统一由 uv 管理：声明在 pyproject.toml，锁定在 uv.lock。
+# 日常在工具箱根目录执行：
+#   uv sync              （需打包 PyInstaller 时加 --extra exe）
+# 本文件仅作 pip 场景的版本参考；新增依赖请先改 pyproject.toml。
+
+# ── 功能① excel_word：Word 表格 ⇄ Excel 同步 ──
+python-docx==1.2.0
+openpyxl==3.1.5
+lxml==6.1.1
+
+# ── 打包为免安装 exe ──
+pyinstaller==6.20.0
+
+# ── 后续功能（如 file_merge）新增依赖在此追加，并注明所属功能 ──

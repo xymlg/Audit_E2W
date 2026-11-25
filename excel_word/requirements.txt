@@ -1,0 +1,4 @@
+# Word 表格 ⇄ Excel 双向同步工具依赖（版本参考；统一由根 pyproject.toml / uv 管理）
+python-docx==1.2.0
+openpyxl==3.1.5
+lxml==6.1.1

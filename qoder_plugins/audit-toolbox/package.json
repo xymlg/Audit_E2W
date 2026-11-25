@@ -1,0 +1,10 @@
+{
+  "name": "audit-toolbox-qoder-plugin",
+  "version": "1.11.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.mjs",
+    "smoke": "node scripts/smoke.mjs"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "name": "audit-e2w",
+  "version": "1.11.1",
+  "description": "Audit_E2W：通过 DSH Agent 在本机完成 Word 与 Excel 审计文档处理。",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dsh_plugins/audit-e2w/lib/index.js",
+  "exports": {
+    ".": "./dsh_plugins/audit-e2w/lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dsh_plugins/audit-e2w/lib/*.js",
+    "dsh_plugins/audit-e2w/lib/*.mjs",
+    "qoder_plugins/audit-toolbox/catalog.mjs",
+    "excel_word/qoder_engine.py",
+    "excel_word/requirements.txt",
+    "excel_word/wesync/**/*.py",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "!excel_word/README.md",
+    "!qoder_plugins/audit-toolbox/README.md"
+  ],
+  "scripts": {
+    "check": "node dsh_plugins/audit-e2w/scripts/check-package.mjs",
+    "test": "node --test dsh_plugins/audit-e2w/test/*.test.mjs",
+    "prepack": "npm run check"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24.11.0",
+    "dsh": "0.2.2-rc.5"
+  },
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xymlg/Audit_E2W.git",
+    "directory": "."
+  },
+  "keywords": ["dsh-plugin", "audit", "word", "excel", "windows"],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml",
+      "platforms": ["win32"]
+    }
+  }
+}
