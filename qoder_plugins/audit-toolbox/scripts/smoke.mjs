@@ -107,14 +107,19 @@ try {
   assert.deepEqual(listed.find(tool => tool.name === "audit_query")._meta.ui.visibility, ["model", "app"])
   assert.ok(listed.find(tool => tool.name === "audit_query").inputSchema.properties.operation.enum.includes("blank-batch-scan"))
   assert.ok(listed.find(tool => tool.name === "audit_run").inputSchema.properties.operation.enum.includes("template-batch"))
+  assert.ok(listed.find(tool => tool.name === "audit_query").inputSchema.properties.roleOverrides)
+  assert.ok(listed.find(tool => tool.name === "audit_run").inputSchema.properties.regionStartId)
   const capabilities = (await call("tools/call", { name: "audit_capabilities", arguments: {} })).result.structuredContent
-  assert.equal(capabilities.operations.length, 28)
+  assert.equal(capabilities.operations.length, 31)
   assert.deepEqual(capabilities.operations.find(item => item.operation === "template-batch").required, ["templates", "items", "outDir"])
   assert.equal(capabilities.operations.find(item => item.operation === "diff-export").dryRun, false)
   assert.equal(capabilities.operations.find(item => item.operation === "writeback").writes, true)
   assert.ok(capabilities.operations.find(item => item.operation === "bookmark").optional.includes("force"))
   assert.ok(!capabilities.operations.find(item => item.operation === "blank-batch-delete").optional.includes("reversible"))
-  assert.ok(!Object.hasOwn(capabilities.operations.find(item => item.operation === "append-table").defaults, "nrows"))
+  assert.equal(capabilities.operations.find(item => item.operation === "incremental-export").dryRun, true)
+  assert.ok(!capabilities.operations.some(item => item.operation === "append-table"))
+  assert.ok(capabilities.operations.find(item => item.operation === "format-scan").optional.includes("roleOverrides"))
+  assert.ok(capabilities.operations.find(item => item.operation === "format-apply").optional.includes("regionStartId"))
   const resource = (await call("resources/read", { uri: "ui://audit-toolbox/main.html" })).result.contents[0]
   assert.equal(resource.mimeType, "text/html;profile=mcp-app")
   assert.deepEqual(resource._meta["qoder/ui"], { availableDisplayModes: ["fullscreen"], preferredDisplayMode: "fullscreen" })
@@ -168,14 +173,14 @@ try {
   assert.equal(blankTask.summary.needsReview, false)
   assert.deepEqual(blankTask.summary.affectedFiles, [path.join(fixture, "甲.docx"), path.join(fixture, "甲_表格数据.xlsx")])
 
-  const failedStarted = (await call("tools/call", { name: "audit_run", arguments: { operation: "sort-set", docx: "D:\\smoke\\报告.docx", code: "T01", column: "金额" } })).result
+  const failedStarted = (await call("tools/call", { name: "audit_run", arguments: { operation: "sort-set", docx: "D:\\smoke\\报告.docx", code: "T01", column: "金额", confirmed: true } })).result
   const failedTask = await waitForTask(failedStarted.structuredContent.taskId)
   assert.equal(failedTask.status, "failed")
   assert.equal(failedTask.summary.message, "找不到列：不存在的列")
 
   const longTask = (await call("tools/call", {
     name: "audit_run",
-    arguments: { operation: "writeback", docx: "D:\\smoke\\报告.docx", excel: "D:\\smoke\\报告_表格数据.xlsx", contents: { tables: false, marks: true, placeholders: false, keepHighlight: true } },
+    arguments: { operation: "writeback", docx: "D:\\smoke\\报告.docx", excel: "D:\\smoke\\报告_表格数据.xlsx", contents: { tables: false, marks: true, placeholders: false, keepHighlight: true }, confirmed: true },
   })).result.structuredContent.taskId
   const cancelled = (await call("tools/call", { name: "audit_cancel", arguments: { taskId: longTask } })).result
   assert.ok(["cancelling", "cancelled"].includes(cancelled.structuredContent.status), JSON.stringify(cancelled))
@@ -268,6 +273,7 @@ try {
   await flush()
   const runRequest = pageSent.find(message => message.params?.name === "audit_run")
   assert.equal(runRequest.params.arguments.operation, "export")
+  assert.equal(runRequest.params.arguments.confirmed, true)
   deliver({ id: runRequest.id, result: { content: [], structuredContent: { taskId: "page-task" } } })
   await flush()
   const taskRequest = pageSent.find(message => message.params?.name === "audit_task_status")

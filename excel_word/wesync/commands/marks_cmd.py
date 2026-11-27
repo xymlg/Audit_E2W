@@ -94,6 +94,7 @@ def cmd_marks_sync(args) -> int:
 
     doc = docx.Document(str(docx_path))
     keep_highlight = bool(getattr(args, "keep_highlight", False))
+    mark_parts = {mark.bookmark: mark.part for mark in find_marks(doc) if mark.bookmark}
     log(f"读取 Word：{docx_path.name}")
     log(f"读取 Excel：{xlsx_path.name}（工作表：{SHEET_MARKS}，{len(rows)} 行）")
     if keep_highlight:
@@ -121,8 +122,9 @@ def cmd_marks_sync(args) -> int:
             warn(f"{label} {row['position']}：新内容与链接地址均未填，保留原样未同步。")
             continue
         p_el, children, runs = payload
+        part = mark_parts.get(bookmark, doc.part)
         result = apply_mark_change(
-            doc.part, p_el, children, runs, row["new"], row["link"], keep_highlight=keep_highlight
+            part, p_el, children, runs, row["new"], row["link"], keep_highlight=keep_highlight, doc=doc
         )
         if result == "deleted":
             deleted += 1

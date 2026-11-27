@@ -2,10 +2,10 @@
 name: audit-word-excel
 display_name: Audit_E2W
 display_name_en: Audit Toolbox
-description: 当用户要求用本地 Word 和 Excel 完成审计办公任务时使用，包括创建 Excel、同步回 Word、链接标注、正文占位符、模板生成报告、批量同步、差异检查、表格维护和备份恢复。遵循先预演或差异检查、写盘前确认、执行后核验的流程。
-description_zh: 在本地处理 Word 与 Excel 的创建、同步、标注、占位符、批量报告、差异检查、表格维护和备份恢复，并由 Agent 先预演、确认再执行。
-description_en: Create and synchronize local Word and Excel audit workpapers, marks, placeholders, batch reports, table maintenance, and backups with preview, approval, and result verification.
-version: 1.11.1
+description: 当用户要求用本地 Word 和 Excel 完成审计办公任务时使用，包括创建 Excel、同步回 Word、链接标注、正文占位符、模板生成报告、批量同步、差异检查、表格维护、报告格式调整和备份恢复。遵循先预演或差异检查、写盘前确认、执行后核验的流程。
+description_zh: 在本地处理 Word 与 Excel 的创建、同步、标注、占位符、批量报告、差异检查、表格维护、报告格式调整和备份恢复，并由 Agent 先预演、确认再执行。
+description_en: Create and synchronize local Word and Excel audit workpapers, marks, placeholders, batch reports, table maintenance, report formatting, and backups with preview, approval, and result verification.
+version: 1.11.3
 author: xymlg
 allowed-tools: Bash
 examples_zh:
@@ -48,9 +48,9 @@ examples_en:
 - 只处理用户明确选择的文件，或用户明确授权的目录内文件；不要猜测客户文件名。
 - 路径必须使用当前系统的绝对路径，扩展名只支持 `.docx`、`.docm`、`.xlsx`、`.xlsm`。
 - 写盘前提醒用户关闭对应 Word/Excel 文件；默认 `force=false`。
-- 查询操作只读。执行操作可能修改或生成文件，必须先预演或做相关只读检查。
+- 查询操作只读。执行操作可能修改或生成文件，必须先预演或做相关只读检查。所有正式写操作都必须同时传 `dryRun=false`、`confirmed=true`；服务端会拒绝缺少确认的请求。
 - 删除、覆盖、恢复备份属于高风险动作，必须展示明确范围并取得确认。
-- 不上传报告内容，不在公开消息、日志或示例中写客户名称、账号、密码或 API Key。
+- 不上传整篇报告，不在公开消息、日志或示例中写客户名称、账号、密码或 API Key。标题识别仅允许把 `format-heading-candidates` 返回的候选标题及有限上下文交给当前宿主 Agent；不得额外读取或发送全文、表格、页眉页脚、批注等内容。
 
 ## 意图映射
 
@@ -74,6 +74,9 @@ examples_en:
 | 查看或设置排序 | `sort-list`；`sort-set` | `code`、`column`、`descending` |
 | 重建或清理书签 | `bookmark`、`clear-bookmarks` | 高风险维护；执行前说明影响 |
 | 查看或恢复备份 | `backup-list`；`backup-restore` | 恢复会覆盖目标，必须明确备份文件和目标文件 |
+| 按样板或格式方案预演 | `format-scan` | `docx`、`template` 或 `profileName`、七项 `scope`；只读 |
+| 识别未标注标题、表题与附注边界 | `format-heading-candidates` | `docx`；只返回本地候选和有限上下文 |
+| 应用格式或确认的标题级别 | `format-apply` | 先预演；输出新副本；正式执行传 `dryRun=false`、`confirmed=true` |
 
 完整参数见 `references/operations.md`。不要凭记忆猜参数。
 
@@ -84,6 +87,16 @@ examples_en:
 - “只同步表格”只设 `contents.tables=true`；“全部同步”才同时开启表格、标注、占位符。
 - 用户说“生成报告”但没说是覆盖还是新建时，先确认，不要自行覆盖原报告。
 - 用户说“这个文件夹”但没给文件规则时，先列出候选文件并确认，不要全部自动处理。
+
+## 报告格式与候选标题
+
+1. 用户要用样板调整格式时，把 `docx` 和样板 `template` 传给 `format-scan`；`template` 与已存 `profileName` 二选一。未指定范围时默认七项全选；自定义 `scope` 必须完整包含 `cover`、`headings`、`statement`、`body`、`table_text`、`table_emphasis`、`table_borders`，不能全关。
+2. 用户要求识别未标注的一至四级标题，或区分表题与表格前引导正文、核对附注边界时，调用 `format-heading-candidates`。只使用返回的 `candidates`（标题）、`role_candidates`（表格前段落）和 `boundary_candidates`（附注起始边界），不要读取全文来补充。向用户展示候选原文、编号和有限上下文；`truncated=true` 时说明候选已达 300 项上限，不能声称已覆盖全部疑难项。
+3. 根据候选的 `text`、`before`、`after`、`style`、`bold`、`size`、`align`、`numbered` 判断标题级别；只使用 `role_candidates[].options` 判断 `body`/`table_title`；只从 `boundary_candidates` 选择附注起始段。编号、居中和加粗只是线索；普通正文、报表名称、日期和目录条目不得仅凭外观判为标题。给出高/中/低置信度，不确定的候选列为“待确认”，不要强行归类。
+4. 输出建议映射：标题为 `{"候选id": 1}`，级别只能是 1～4 整数；疑难角色为 `{"候选id": "body"}` 或 `{"候选id": "table_title"}`；边界为单个 `regionStartId`。不是标题或不改角色的候选不列入。逐项展示建议、置信度和边界变化，允许修改或删除，只在用户确认后保存 `headingLevels`、`roleOverrides`、`regionStartId`。
+5. 将原样确认的 `headingBatchId`、`headingLevels` 和相同的 `docx`/样板/范围传给 `format-scan`。角色或边界使用同一个 `batch_id` 作为 `roleBatchId`；标题与角色同时确认时两个批次编号必须一致。核对预演数量、`assigned_headings`、`assigned_roles` 和 `region_start`；报告或候选变化导致旧批次被拒绝时，重新扫描并重新确认，不得沿用旧结果。
+6. 预演后取得用户执行确认，调用 `format-apply`：`dryRun=true` 只预演；正式执行用 `dryRun=false`、`confirmed=true`，并指定新的 `output` 路径。绝不覆盖原报告。
+7. 候选级别和角色只应用直接排版，边界只改变本次格式处理范围；不写标题样式、不改大纲级别、不更新目录。完成后核对输出为新文件、原报告未改、确认数量一致，并按返回的 `visual_review` 提醒用户在 Word 中复核封面、标题、正文、表题、宽表格和分页。结构核验通过不等于目视排版通过。
 
 ## 标准工作流程
 
@@ -98,7 +111,7 @@ examples_en:
 
 以下操作支持 `dryRun=true`：
 
-`export`、`writeback`、`bookmark`、`rejudge`、`clear-bookmarks`、`marks`、`marks-sync`、`placeholders`、`placeholders-sync`、`blank-delete`、`restore-tables`、`blank-batch-delete`、`batch-writeback`、`template-batch`。
+`export`、`writeback`、`bookmark`、`rejudge`、`clear-bookmarks`、`marks`、`marks-sync`、`placeholders`、`placeholders-sync`、`blank-delete`、`restore-tables`、`blank-batch-delete`、`batch-writeback`、`template-batch`、`format-apply`。
 
 不支持的写盘操作，用相关只读查询代替预检，并在执行前明确说明。不要把 `dryRun=true` 当成所有操作都有效。
 
@@ -115,7 +128,7 @@ examples_en:
 
 ### 4. 正式执行
 
-- 把预演请求中的 `dryRun` 改为 `false`。
+- 把预演请求中的 `dryRun` 改为 `false`。`format-apply` 还必须传 `confirmed=true`。
 - 默认开启 `backup=true`；只有用户明确要求时才关闭备份。
 - 默认 `force=false`；只有用户明确同意跳过占用检查时才传 `true`。
 - `.xlsm` 必须保留 VBA。
@@ -169,4 +182,4 @@ Python operation 返回整数 `0` 常表示成功码，不是“零个改动”�
 
 - 操作参数：`references/operations.md`
 - 本地脚本配置：`references/local-cli.md`
-- Qoder、WorkBuddy、DSH 安装位置：`references/platforms.md`
+- 平台安装位置与边界：`references/platforms.md`

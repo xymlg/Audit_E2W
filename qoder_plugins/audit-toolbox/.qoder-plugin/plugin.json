@@ -1,7 +1,7 @@
 {
   "name": "audit-toolbox",
   "displayName": "Audit_E2W",
-  "version": "1.11.1",
+  "version": "1.11.3",
   "description": "通过 Agent 对话或交互页面，本地完成 Word 与 Excel 的创建、同步、标注、占位符、批量报告和备份回滚。",
   "author": {
     "name": "xymlg"

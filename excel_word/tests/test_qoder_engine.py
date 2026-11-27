@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from docx import Document
 from openpyxl import Workbook, load_workbook
 
 from helpers import ws_dir
@@ -166,7 +167,87 @@ def test_query_rejects_dry_run_and_backup_restore_requires_same_type():
     with pytest.raises(SyncError, match="不支持预演"):
         qoder_engine._dispatch({"operation": "diff", "docx": r"D:\a.docx", "dryRun": True})
     with pytest.raises(SyncError, match="类型必须一致"):
-        qoder_engine._dispatch({"operation": "backup-restore", "backupPath": r"D:\a.docx", "target": r"D:\a.xlsx"})
+        qoder_engine._dispatch({"operation": "backup-restore", "backupPath": r"D:\a.docx", "target": r"D:\a.xlsx", "confirmed": True})
+
+
+def test_backup_restore_rejects_unrelated_file_and_is_atomic(monkeypatch):
+    from wesync import backup_history
+    from wesync.fsops import backup_file
+
+    d = ws_dir("qoder_backup_restore")
+    target = d / "报告.docx"
+    target.write_bytes(b"original")
+    backup = backup_file(target)
+    unrelated = d / "其他.docx"
+    unrelated.write_bytes(b"unrelated")
+    with pytest.raises(SyncError, match="不是.*历史备份"):
+        backup_history.restore_backup(unrelated, target)
+    assert target.read_bytes() == b"original"
+
+    target.write_bytes(b"current")
+    real_copy = backup_history.shutil.copy2
+
+    def fail_restore_copy(src, dst):
+        if Path(src) == backup and ".restore." in Path(dst).name:
+            raise OSError("模拟恢复复制失败")
+        return real_copy(src, dst)
+
+    monkeypatch.setattr(backup_history.shutil, "copy2", fail_restore_copy)
+    with pytest.raises(OSError, match="模拟恢复复制失败"):
+        backup_history.restore_backup(backup, target)
+    assert target.read_bytes() == b"current"
+    assert not list(d.glob(".报告.restore.*"))
+    history = backup_history.list_backups(target)
+    assert len(history) == 2
+    assert Path(history[0]["path"]).read_bytes() == b"current", [(item["file"], item["sequence"]) for item in history]
+
+
+def test_backup_restore_uses_selected_history():
+    from wesync import backup_history
+    from wesync.fsops import backup_file
+
+    d = ws_dir("qoder_backup_success")
+    target = d / "报告.docx"
+    target.write_bytes(b"version-one")
+    backup = backup_file(target)
+    target.write_bytes(b"version-two")
+    safety = backup_history.restore_backup(backup, target)
+    assert target.read_bytes() == b"version-one"
+    assert safety and safety.read_bytes() == b"version-two"
+
+
+def test_engine_rejects_every_unconfirmed_write_before_dispatch(monkeypatch):
+    called = []
+    monkeypatch.setattr(qoder_engine.api, "run_export", lambda *args, **kwargs: called.append(args))
+    with pytest.raises(SyncError, match="confirmed=true"):
+        qoder_engine._dispatch({"operation": "export", "docx": r"D:\a.docx"})
+    with pytest.raises(SyncError, match="confirmed=true"):
+        qoder_engine._dispatch({"operation": "backup-restore", "backupPath": r"D:\a.docx", "target": r"D:\a.docx"})
+    assert called == []
+
+
+def test_incremental_export_dispatch(monkeypatch):
+    d = ws_dir("qoder_incremental")
+    docx = d / "报告.docx"
+    excel = d / "数据.xlsx"
+    docx.write_bytes(b"docx")
+    excel.write_bytes(b"excel")
+    captured = {}
+
+    def fake_incremental(*args, **kwargs):
+        captured.update(args=args, kwargs=kwargs)
+        return 0
+
+    monkeypatch.setattr(qoder_engine.api, "run_incremental_export", fake_incremental)
+    assert qoder_engine._dispatch({
+        "operation": "incremental-export", "docx": str(docx), "excel": str(excel),
+        "dryRun": True, "backup": False, "withExcelLinks": False, "totalsFormula": False,
+    }) == 0
+    assert captured["args"] == (str(docx), str(excel))
+    assert captured["kwargs"] == {
+        "dry_run": True, "force": False, "with_excel_links": False,
+        "totals_formula": False, "backup": False,
+    }
 
 
 def test_jsonable_serializes_paths_and_dates():
@@ -174,6 +255,108 @@ def test_jsonable_serializes_paths_and_dates():
     assert qoder_engine._jsonable({"path": path, "time": datetime(2026, 11, 24, 9, 30)}) == {
         "path": str(path), "time": "2026-11-24T09:30:00",
     }
+
+
+def test_format_query_and_confirmed_apply_forward_arguments(monkeypatch):
+    d = ws_dir("qoder_format_engine")
+    docx = d / "报告.docx"
+    template = d / "样板.docx"
+    output = d / "报告_调整格式.docx"
+    for path in (docx, template):
+        path.write_bytes(b"docx")
+    scope = {key: True for key in ("cover", "headings", "statement", "body", "table_text", "table_emphasis", "table_borders")}
+    levels = {"p0003-abc": 2}
+    roles = {"p0008-def": "table_title"}
+    region_id = "b0000-abc"
+    captured = {}
+    monkeypatch.setattr(qoder_engine.api, "scan_format_heading_candidates", lambda value: {"batch_id": "batch", "candidates": []})
+    monkeypatch.setattr(qoder_engine.api, "scan_report_format", lambda *args, **kwargs: captured.update(scan=(args, kwargs)) or {})
+    monkeypatch.setattr(qoder_engine.api, "run_report_format", lambda *args, **kwargs: captured.update(run=(args, kwargs)) or {})
+
+    assert qoder_engine._dispatch({"operation": "format-heading-candidates", "docx": str(docx)})["batch_id"] == "batch"
+    qoder_engine._dispatch({
+        "operation": "format-scan", "docx": str(docx), "template": str(template),
+        "scope": scope, "headingBatchId": "batch", "headingLevels": levels,
+        "roleBatchId": "batch", "roleOverrides": roles, "regionStartId": region_id,
+    })
+    assert captured["scan"][1] == {
+        "template": str(template), "profile_name": None, "scope": scope,
+        "heading_batch_id": "batch", "heading_levels": levels,
+        "role_batch_id": "batch", "role_overrides": roles, "region_start_id": region_id,
+    }
+    with pytest.raises(SyncError, match="用户确认"):
+        qoder_engine._dispatch({"operation": "format-apply", "docx": str(docx)})
+    qoder_engine._dispatch({
+        "operation": "format-apply", "docx": str(docx), "output": str(output),
+        "dryRun": False, "confirmed": True,
+    })
+    assert captured["run"][0] == (str(docx),)
+    assert captured["run"][1]["output"] == str(output)
+    assert captured["run"][1]["dry_run"] is False
+
+
+def test_format_query_rejects_dry_run_and_invalid_heading_levels():
+    with pytest.raises(SyncError, match="不支持预演"):
+        qoder_engine._dispatch({"operation": "format-heading-candidates", "docx": r"D:\a.docx", "dryRun": True})
+    with pytest.raises(SyncError, match="1～4"):
+        qoder_engine._dispatch({
+            "operation": "format-scan", "docx": r"D:\a.docx",
+            "headingBatchId": "batch", "headingLevels": {"p0003-abc": True},
+        })
+    with pytest.raises(SyncError, match="角色只能"):
+        qoder_engine._dispatch({
+            "operation": "format-scan", "docx": r"D:\a.docx",
+            "roleBatchId": "batch", "roleOverrides": {"p0008-def": "heading_1"},
+        })
+
+
+def test_engine_process_candidate_heading_workflow():
+    root = Path(__file__).resolve().parents[1]
+    d = ws_dir("qoder_heading_protocol")
+    source = d / "候选标题.docx"
+    output = d / "候选标题_调整格式.docx"
+    doc = Document()
+    doc.add_paragraph("审计报告")
+    heading = doc.add_paragraph("一、总体情况")
+    heading.runs[0].bold = True
+    body_text = "这是普通正文，不应被识别为标题，也不应被完整发送给模型。" + "不得作为标题。" * 20
+    doc.add_paragraph(body_text)
+    doc.save(str(source))
+    original = source.read_bytes()
+    scope = {key: key == "headings" for key in ("cover", "headings", "statement", "body", "table_text", "table_emphasis", "table_borders")}
+    requests = [
+        {"id": "candidates", "operation": "format-heading-candidates", "docx": str(source)},
+        {"id": "preview", "operation": "format-apply", "docx": str(source), "output": str(output), "scope": scope, "dryRun": True},
+    ]
+    completed = subprocess.run(
+        [sys.executable, "qoder_engine.py"], cwd=root,
+        input="".join(json.dumps(item, ensure_ascii=False) + "\n" for item in requests),
+        text=True, encoding="utf-8", capture_output=True, check=True, timeout=30,
+    )
+    results = {item["id"]: item for item in map(json.loads, completed.stdout.splitlines()) if item.get("type") == "result"}
+    package = results["candidates"]["data"]
+    assert package["candidate_count"] == 1
+    assert package["candidates"][0]["text"] == "一、总体情况"
+    assert package["candidates"][0]["after"] == body_text[:100]
+    assert len(package["candidates"][0]["after"]) <= 100
+    assert results["preview"]["code"] == 0
+    assert not output.exists()
+    level = {package["candidates"][0]["id"]: 1}
+    apply_request = {
+        "id": "apply", "operation": "format-apply", "docx": str(source), "output": str(output),
+        "scope": scope, "dryRun": False, "confirmed": True,
+        "headingBatchId": package["batch_id"], "headingLevels": level,
+    }
+    completed = subprocess.run(
+        [sys.executable, "qoder_engine.py"], cwd=root,
+        input=json.dumps(apply_request, ensure_ascii=False) + "\n",
+        text=True, encoding="utf-8", capture_output=True, check=True, timeout=30,
+    )
+    result = next(item for item in map(json.loads, completed.stdout.splitlines()) if item.get("type") == "result")
+    assert result["code"] == 0
+    assert result["data"]["assigned_headings"] == 1
+    assert output.is_file()
+    assert source.read_bytes() == original
 
 
 def test_engine_process_version_protocol():

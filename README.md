@@ -2,13 +2,13 @@
 
 让 Agent 按你的指令处理本机 Word / Excel 审计文档：从 Word 提取表格、标注和正文占位符，在 Excel 中修改，再同步回 Word；也支持空白表格处理、差异检查、排序、批量报告和备份恢复。
 
-当前版本：**1.11.1**。仅支持 **Windows 10/11 64 位**，不支持 macOS。
+当前版本：**1.11.3**。仅支持 **Windows 10/11 64 位**，不支持 macOS。
 
 ## 能做什么
 
 - **Word → Excel**：导出表格；只要表格、链接标注、正文占位符任意一种存在就导出，并创建三个工作表。
 - **Excel → Word**：同步单元格、行列结构、标注、正文占位符及数值显示格式；同步前可检查差异。
-- **表格维护**：重建书签、重新判定表块、追加表格、设置或清除排序。
+- **表格维护**：重建书签、重新判定表块、增量导出、设置或清除排序。
 - **空白表格**：扫描、删除、查看已删除表块、恢复；支持批量处理。
 - **批量办公**：批量同步、单模板批量生成报告、批量填写占位符。
 - **安全回退**：修改前备份，可查看备份历史并恢复；预演不写文件，危险操作需确认。
@@ -53,16 +53,17 @@ python -m venv .venv
 源码目录为 `qoder_plugins/audit-toolbox`。构建脚本会把 Windows 引擎、MCP Server、界面和 Skill 打入插件 ZIP：
 
 ```powershell
+.\.venv\Scripts\python.exe .\packaging\build_qoder_plugin.py --check-only
 .\.venv\Scripts\python.exe .\packaging\build_qoder_plugin.py
 ```
 
-构建前需要 PyInstaller；产物位于 `dist/qoder_plugins`。Qoder 插件包使用 Qoder 内置 Node.js 运行 MCP Server。
+构建前需要 PyInstaller；产物位于 `dist/qoder_plugins`。Qoder 插件包使用 Qoder 内置 Node.js 运行 MCP Server。构建脚本按 `packaging/build_qoder_plugin.py` 的明确清单复制插件源文件，拒绝链接/junction、客户 Office 文档、锁文件和缓存，并在生成 ZIP 后复核同一清单；`--check-only` 同时核对版本、源树、安装脚本白名单及已有便携版目录。
 
 ### 3. DSH 完整插件
 
 仓库根目录是可安装的 DSH npm bundle，入口声明在 `cordis.patch.yml`，提供四个工具：
 
-- `audit_capabilities`：查看 28 个操作及参数。
+- `audit_capabilities`：查看 31 个操作及参数。
 - `audit_engine_status`：检查本机引擎和版本。
 - `audit_query`：只读扫描与差异检查。
 - `audit_run`：执行操作；非预演写操作必须经 DSH 用户审批。
@@ -101,7 +102,7 @@ npm pack --dry-run
 
 ### 4. 通用 Agent Skill
 
-`agent_skills/audit-word-excel` 是 WorkBuddy、DSH 等 Agent 可使用的通用工作流 Skill。它不包含 Windows 引擎二进制，必须配合本机执行脚本或已安装的 Windows 程序使用。
+`agent_skills/audit-word-excel-workbuddy` 是 WorkBuddy 专用工作流 Skill，只走本地脚本通道；`agent_skills/audit-word-excel` 是 DSH 等 Agent 的通用工作流 Skill。两者都不包含 Windows 引擎二进制，必须配合本机执行脚本或已安装的 Windows 程序使用。
 
 ```powershell
 .\.venv\Scripts\python.exe .\packaging\build_agent_skills.py --check-only

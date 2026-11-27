@@ -6,9 +6,10 @@ from openpyxl.styles import PatternFill
 
 
 SHEET_NAME = "表格汇总"
+SHEET_NEW_TABLES = "新增表格"
 
 
-CODE_RE = re.compile(r"^T\d{2,}$")
+CODE_RE = re.compile(r"^(?:T|XT)\d{2,}$")
 
 
 DATE_RE = re.compile(r"^\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日$")
@@ -23,7 +24,7 @@ EXCEL_LINK_TEXT = "〔→Excel〕"
 BOOKMARK_PREFIX = "Table_"
 
 
-# 新表标记：表块 C 列写「书签：新增」表示要在 Word 里新建这张表
+# 旧版新表标记：仅用于识别并提示旧工作簿，已不再支持同步建表
 NEW_BOOKMARK = "新增"
 
 # 可逆删除标记：表块 C 列写「书签：已删除」表示 Word 里的表已删、表块保留待恢复

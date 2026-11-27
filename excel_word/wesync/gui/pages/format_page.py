@@ -134,6 +134,7 @@ class FormatPage(BasePage):
             "body": "正文段落",
             "table_text": "表格字体与字号（小报表字号不放大）",
             "table_emphasis": "表格对齐、表头与合计行加粗",
+            "table_borders": "表格框线（外框、内部横线和竖线）",
         }
         for key in DEFAULT_SCOPE:
             button = make_checkbutton(tab, descriptions[key], checked=True)
@@ -201,7 +202,7 @@ class FormatPage(BasePage):
         self.status_label.setText("正在提取并保存纯格式方案…")
 
         def run() -> int:
-            self._result = api.save_format_profile(template, name)
+            self._result = api.save_format_profile(template, name, source=self.ctx.docx)
             return 0
 
         self.ctx.run_steps([("保存纯格式方案", run)])
@@ -379,7 +380,11 @@ class FormatPage(BasePage):
             self.apply_button.setEnabled(False)
             self.status_label.setText(f"格式副本已生成并核验：{output}")
             self.details.appendPlainText(f"\n已生成：{output}\n原报告未改动。")
-            self.ctx.info("格式副本已生成", f"格式副本已生成并核验：\n{output}\n\n原报告未改动。")
+            review = self._result.get("visual_review", [])
+            if review:
+                self.details.appendPlainText("\nWord 目视验收（结构核验不代表排版已通过）：")
+                self.details.appendPlainText("\n".join(f"· {item}" for item in review))
+            self.ctx.info("格式副本已生成", f"格式副本已生成并结构核验：\n{output}\n\n原报告未改动。请在 Word 中按“目视验收清单”复核排版。")
 
     def _render_scan(self, result: dict, output: str = "") -> None:
         totals = result["totals"]
@@ -408,6 +413,8 @@ class FormatPage(BasePage):
             lines.append(f"· 表格字体与字号：{result['table_format']}")
         if result["scope"]["table_emphasis"]:
             lines.append("· 表格强调：表头居中，数值右对齐，普通文字左对齐，表头和合计行加粗。")
+        if result["scope"]["table_borders"]:
+            lines.append(f"· 表格框线：{result['table_border_format']}")
         if result["scope"]["table_text"]:
             lines.append(f"· {result['small_table_policy']}")
         if result["warnings"]:

@@ -1,4 +1,4 @@
-import { emptySchema, operationSpecs, pathProperties, queryOperations, runOperations, runProperties, validateRunArgs } from "../../../qoder_plugins/audit-toolbox/catalog.mjs"
+import { emptySchema, formatProperties, operationSpecs, pathProperties, queryOperations, runOperations, runProperties, validateRunArgs } from "../../../qoder_plugins/audit-toolbox/catalog.mjs"
 import manifest from "../../../package.json" with { type: "json" }
 import { AuditRuntime } from "./engine.mjs"
 import { skillContent, skillDescription, skillName, skillWhenToUse } from "./skill.js"
@@ -15,6 +15,14 @@ const queryProperties = {
   docx: pathProperties.docx,
   excel: pathProperties.excel,
   paths: pathProperties.paths,
+  template: formatProperties.template,
+  profileName: formatProperties.profileName,
+  scope: formatProperties.scope,
+  headingBatchId: formatProperties.headingBatchId,
+  headingLevels: formatProperties.headingLevels,
+  roleBatchId: formatProperties.roleBatchId,
+  roleOverrides: formatProperties.roleOverrides,
+  regionStartId: formatProperties.regionStartId,
 }
 
 export function createTools({ runtime = new AuditRuntime(), approval } = {}) {

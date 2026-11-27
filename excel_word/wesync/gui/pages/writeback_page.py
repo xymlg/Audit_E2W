@@ -1,19 +1,14 @@
-"""同步页：Excel → Word（含增删行、增删列、按「书签：新增」标记创建新表）。"""
+"""同步页：Excel → Word（含增删行、增删列，同步「表格汇总」与「新增表格」）。"""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
-    QGridLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QLineEdit,
-    QMessageBox,
     QPushButton,
-    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -30,7 +25,7 @@ from ._page import BasePage
 
 class WritebackPage(BasePage):
     title = "同步Word"
-    subtitle = "工作簿改动回写 Word，保留格式、支持增删行列；带「新增」标记的表块会在 Word 里建出新表。"
+    subtitle = "工作簿改动回写 Word，保留格式、支持增删行列；「表格汇总」和「新增表格」会一并同步。"
 
     def build(self, body: QWidget) -> None:
         card = self.card(body)
@@ -78,14 +73,10 @@ class WritebackPage(BasePage):
         layout.addWidget(self.delete_empty)
 
         row = self.button_row(tab, lambda: self._start(True), lambda: self._start(False), "仅预演", "开始同步")
-        btn = QPushButton("追加新表块")
-        btn.clicked.connect(lambda _checked=False: self._append_block())
-        row.layout().insertWidget(row.layout().count() - 1, btn)
         self.tip_label(
             tab,
-            "要在报告里加一张新表：点「追加新表块」→ 选插在哪张表下面 → 新表块会直接插到 Excel 里那张表的下面"
-            "（后续表块下移、编号自动顺延）→ 填好内容（首行为表头，可合并单元格、写公式）→ 点「开始同步」，"
-            "新表会建到 Word 里同一位置。",
+            "Word 中新增表格后，先到「创建Excel」页点「增量导出」；新表会登记到「新增表格」（XT01、XT02…），"
+            "之后在这里与「表格汇总」一起同步。",
         )
         layout.addStretch(1)
         return tab
@@ -138,82 +129,6 @@ class WritebackPage(BasePage):
         self._sort_items: list[dict] = []
         layout.addStretch(1)
         return tab
-
-    def _append_block(self) -> None:
-        if not self.ctx.require_docx():
-            return
-        excel = self.ctx.workbook_path()
-        if not excel.exists():
-            self.ctx.error("未找到工作簿", f"未找到工作簿：\n{excel}\n\n请先执行「导出表格到 Excel」生成工作簿。")
-            return
-        dlg = QDialog(self)
-        dlg.setWindowTitle("追加新表块")
-        dlg.setModal(True)
-        grid = QGridLayout(dlg)
-        grid.setContentsMargins(16, 16, 16, 16)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        grid.addWidget(QLabel("表名（将成为 Word 里的表标题）："), 0, 0, 1, 2)
-        name_edit = QLineEdit()
-        grid.addWidget(name_edit, 1, 0, 1, 2)
-        grid.addWidget(QLabel("行数（含表头）"), 2, 0)
-        rows_spin = QSpinBox()
-        rows_spin.setRange(1, 200)
-        rows_spin.setValue(5)
-        grid.addWidget(rows_spin, 2, 1)
-        grid.addWidget(QLabel("列数"), 3, 0)
-        cols_spin = QSpinBox()
-        cols_spin.setRange(1, 30)
-        cols_spin.setValue(4)
-        grid.addWidget(cols_spin, 3, 1)
-        grid.addWidget(QLabel("插在哪张表下面（Excel 与 Word 建表位置一致）"), 4, 0, 1, 2)
-        pos_combo = QComboBox()
-        pos_map: dict[str, str] = {}
-        pos_combo.addItem("（最后一张表下面）")
-        try:
-            for item in api.list_table_blocks(self.ctx.docx, self.ctx.excel):
-                short = item["name"].split(" · 章节：")[0]
-                if len(short) > 24:
-                    short = short[:23] + "…"
-                label = f"{item['code']} · {short}" if short else item["code"]
-                pos_map[label] = item["code"]
-                pos_combo.addItem(label)
-        except SyncError:
-            pass
-        grid.addWidget(pos_combo, 5, 0, 1, 2)
-
-        def ok() -> None:
-            after = pos_map.get(pos_combo.currentText())
-            set_log_sink(lambda message: self.ctx.log(message))
-            try:
-                code = api.run_append_table_block(
-                    self.ctx.docx,
-                    self.ctx.excel,
-                    name=name_edit.text(),
-                    nrows=rows_spin.value(),
-                    ncols=cols_spin.value(),
-                    after=after,
-                )
-            except SyncError as exc:
-                QMessageBox.critical(dlg, "追加失败", str(exc))
-                return
-            finally:
-                set_log_sink(None)
-            dlg.accept()
-            self.ctx.log(f"新表块 {code} 已就绪：在 Excel 填好内容后点「开始同步」即可在 Word 里建表。", "ok")
-
-        btns = QHBoxLayout()
-        btns.addStretch(1)
-        cancel = QPushButton("取消")
-        cancel.clicked.connect(lambda _checked=False: dlg.reject())
-        btns.addWidget(cancel)
-        append = QPushButton("追加")
-        append.setObjectName("Primary")
-        append.clicked.connect(lambda _checked=False: ok())
-        btns.addWidget(append)
-        grid.addLayout(btns, 6, 0, 1, 2)
-        name_edit.returnPressed.connect(ok)
-        dlg.exec()
 
     def _start(self, dry_run: bool) -> None:
         if not self.ctx.require_docx():

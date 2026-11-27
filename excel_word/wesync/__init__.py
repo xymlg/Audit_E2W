@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-__version__ = "1.11.1"
+__version__ = "1.11.3"
 
 from .cli import main
 

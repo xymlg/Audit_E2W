@@ -9,7 +9,7 @@ from .console import log
 from .docx_edit import _remove_text_nodes
 from .docx_grid import build_cellmap, cell_text, header_rows, parse_tc_props
 from .errors import SyncError
-from .valuefmt import display_text
+from .valuefmt import display_cell
 
 
 def _set_grid_span(tc, span: int) -> None:
@@ -109,8 +109,8 @@ def _excel_cell_display(ws, row: int, col: int, cached=None) -> str:
     cell = ws.cell(row, col)
     value = cell.value
     if isinstance(value, str) and value.startswith("=") and cached is not None:
-        value = cached.get((row, col))
-    return display_text(value, cell.number_format).strip()
+        value = cached.get((ws.title, row, col))
+    return display_cell(cell, value).strip()
 
 
 def _word_column_signatures(trs, cellmap, ncols: int) -> list[tuple[str, ...]]:

@@ -133,11 +133,13 @@ def _stage_office_file(path: Path, save, validate) -> dict:
     try:
         save(staged)
         validate(staged)
-        fd, rollback_name = tempfile.mkstemp(prefix=f".{path.stem}.rollback.", suffix=path.suffix, dir=path.parent)
-        os.close(fd)
-        rollback = Path(rollback_name)
-        shutil.copy2(path, rollback)
-        return {"path": path, "new": staged, "old": rollback, "backup": None, "keep_old": False}
+        existed = path.exists()
+        if existed:
+            fd, rollback_name = tempfile.mkstemp(prefix=f".{path.stem}.rollback.", suffix=path.suffix, dir=path.parent)
+            os.close(fd)
+            rollback = Path(rollback_name)
+            shutil.copy2(path, rollback)
+        return {"path": path, "new": staged, "old": rollback, "backup": None, "keep_old": False, "existed": existed}
     except Exception:
         staged.unlink(missing_ok=True)
         if rollback is not None:
@@ -187,7 +189,10 @@ def save_docx_xlsx_transaction(
                 rollback_errors = []
                 for previous in reversed(replaced):
                     try:
-                        os.replace(previous["old"], previous["path"])
+                        if previous["existed"]:
+                            os.replace(previous["old"], previous["path"])
+                        else:
+                            previous["path"].unlink(missing_ok=True)
                         previous["old"] = None
                     except OSError as rollback_exc:
                         previous["keep_old"] = True

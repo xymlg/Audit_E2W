@@ -9,7 +9,7 @@ process.stdin.on("data", chunk => { input += chunk })
 process.stdin.on("end", () => {
   const request = JSON.parse(input)
   console.log(JSON.stringify({ type: "log", level: "info", message: "engine-ok" }))
-  console.log(JSON.stringify({ type: "result", code: 0, operation: request.operation, version: "1.11.1", data: { request } }))
+  console.log(JSON.stringify({ type: "result", code: 0, operation: request.operation, version: "1.11.3", data: { request } }))
 })
 `
 

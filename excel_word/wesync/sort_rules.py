@@ -15,7 +15,7 @@ from openpyxl.styles import Alignment, Font
 from .config import FILL_ANCHOR, FONT_NAME, FONT_SIZE, META_SCAN_COLUMNS, NUMBER_RE, SHEET_NAME
 from .console import log, warn
 from .errors import SyncError
-from .valuefmt import display_text, evaluate_formula
+from .valuefmt import display_cell, evaluate_formula
 
 SORT_PREFIX = "排序："
 DESC = "降序"
@@ -87,21 +87,20 @@ def block_headers(ws, block: dict) -> list[str]:
     head = block["grid_rows"][0]
     col0 = block.get("col0", 2)
     return [
-        display_text(ws.cell(head, col0 + c).value, ws.cell(head, col0 + c).number_format).strip()
+        display_cell(ws.cell(head, col0 + c)).strip()
         for c in range(block["ncols"])
     ]
 
 
 def _row_text(ws, row: int, col: int) -> str:
-    cell = ws.cell(row, col)
-    return display_text(cell.value, cell.number_format).strip()
+    return display_cell(ws.cell(row, col)).strip()
 
 
 def _amount(ws, row: int, col: int, cached) -> float | None:
     cell = ws.cell(row, col)
     raw = cell.value
     if isinstance(raw, str) and raw.startswith("="):
-        raw = cached.get((row, col))
+        raw = cached.get((ws.title, row, col))
         if raw is None:
             raw = evaluate_formula(ws, row, col, cached)
     if isinstance(raw, (int, float)) and not isinstance(raw, bool):
@@ -218,11 +217,15 @@ def apply_block_sort(ws, block: dict, cached: dict, dry_run: bool = False) -> di
             cell = ws.cell(r, c)
             if isinstance(cell.value, str) and cell.value.startswith("="):
                 cell.value = _remap_formula(cell.value, rowmap)
-    cached_snapshot = {key: value for key, value in cached.items() if key[0] in rowmap}
-    for key in list(cached_snapshot):
+    cached_snapshot = {
+        (sheet, r, c): value
+        for (sheet, r, c), value in cached.items()
+        if sheet == ws.title and r in rowmap
+    }
+    for key in cached_snapshot:
         del cached[key]
-    for (r, c), value in cached_snapshot.items():
-        cached[(rowmap[r], c)] = value
+    for (sheet, r, c), value in cached_snapshot.items():
+        cached[(sheet, rowmap[r], c)] = value
     log(f"[排序] {code}：已按「{column}」{DESC if descending else ASC}重排 {moved} 行{note}，合计行保持末行")
     return {"moved": moved, "others": len(others), "unparsed": unparsed}
 

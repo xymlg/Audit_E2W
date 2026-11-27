@@ -25,10 +25,10 @@ function fixture(decision = "allowed-once") {
   return { tools: createTools({ runtime, approval }), calls, decisions }
 }
 
-test("capability catalog exposes all 28 operations", async () => {
+test("capability catalog exposes all 31 operations", async () => {
   const { tools } = fixture()
   const result = await tools.capabilities.execute({}, exec)
-  assert.equal(result.operations.length, 28)
+  assert.equal(result.operations.length, 31)
   assert.equal(result.operations.find(item => item.operation === "writeback").dryRun, true)
 })
 
@@ -48,7 +48,7 @@ test("dry run does not request write approval", async () => {
 
 test("write requires allowed-once approval", async () => {
   const { tools, calls, decisions } = fixture("allowed-once")
-  await tools.run.execute({ operation: "writeback", docx, excel, contents: { tables: true } }, exec)
+  await tools.run.execute({ operation: "writeback", docx, excel, contents: { tables: true }, confirmed: true }, exec)
   assert.equal(calls.length, 1)
   assert.equal(decisions.length, 1)
   assert.equal(decisions[0].agent, exec.agent)
@@ -57,8 +57,22 @@ test("write requires allowed-once approval", async () => {
 
 test("rejected write never reaches the engine", async () => {
   const { tools, calls } = fixture("rejected")
-  await assert.rejects(tools.run.execute({ operation: "writeback", docx, excel }, exec), /未批准/)
+  await assert.rejects(tools.run.execute({ operation: "writeback", docx, excel, confirmed: true }, exec), /未批准/)
   assert.equal(calls.length, 0)
+})
+
+test("unconfirmed write is rejected before host approval", async () => {
+  const { tools, calls, decisions } = fixture()
+  await assert.rejects(tools.run.execute({ operation: "writeback", docx, excel }, exec), /confirmed=true/)
+  assert.equal(calls.length, 0)
+  assert.equal(decisions.length, 0)
+})
+
+test("format query accepts preview parameters", async () => {
+  const { tools, calls } = fixture()
+  const scope = Object.fromEntries(["cover", "headings", "statement", "body", "table_text", "table_emphasis", "table_borders"].map(key => [key, true]))
+  await tools.query.execute({ operation: "format-scan", docx, template: "C:\\样板.docx", scope, headingBatchId: "batch", headingLevels: { p1: 2 } }, exec)
+  assert.equal(calls[0].headingLevels.p1, 2)
 })
 
 test("relative paths and unsupported parameters fail closed", async () => {

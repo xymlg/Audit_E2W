@@ -13,21 +13,14 @@ VALUES_SHEET = "正文信息"
 
 
 def _iter_paragraphs(doc):
-    """正文段落（含表格内）+ 各节页眉页脚（含其中表格）。"""
-    def _walk(container):
-        yield from container.paragraphs
-        for table in container.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    yield from _walk(cell)
-
-    yield from _walk(doc)
+    """正文与页眉页脚的直接段落；表格内占位符不参与。"""
+    yield from doc.paragraphs
     for section in doc.sections:
         for part in (section.header, section.footer,
                      section.first_page_header, section.first_page_footer,
                      section.even_page_header, section.even_page_footer):
             if part is not None:
-                yield from _walk(part)
+                yield from part.paragraphs
 
 
 def scan_placeholders(doc) -> list[str]:
@@ -94,7 +87,7 @@ def read_placeholder_values(xlsx_path, *, resolve_formulas: bool = True) -> dict
     from openpyxl import load_workbook
 
     from .errors import SyncError
-    from .valuefmt import display_text, formula_result
+    from .valuefmt import display_cell, formula_result
 
     wb = load_workbook(str(xlsx_path))
     if VALUES_SHEET not in wb.sheetnames:
@@ -103,8 +96,17 @@ def read_placeholder_values(xlsx_path, *, resolve_formulas: bool = True) -> dict
     ws = wb[VALUES_SHEET]
     cached_ws = cached_wb[VALUES_SHEET] if cached_wb is not None else None
     values = {}
+    seen_rows: dict[str, int] = {}
     for row in range(2, (ws.max_row or 1) + 1):
         field = str(ws.cell(row, 1).value or "").strip()
+        if not field:
+            continue
+        if field in seen_rows:
+            raise SyncError(
+                f"「{VALUES_SHEET}」字段“{field}”重复出现在第 {seen_rows[field]} 行和第 {row} 行，"
+                "无法确定使用哪个值。请合并为一行后再同步。"
+            )
+        seen_rows[field] = row
         cell = ws.cell(row, 2)
         raw = cell.value
         if resolve_formulas and isinstance(raw, str) and raw.startswith("="):
@@ -118,7 +120,7 @@ def read_placeholder_values(xlsx_path, *, resolve_formulas: bool = True) -> dict
             if not resolve_formulas and isinstance(raw, str) and raw.startswith("="):
                 values[field] = raw
             else:
-                values[field] = display_text(raw, cell.number_format)
+                values[field] = display_cell(cell, raw)
     return values
 
 
@@ -131,27 +133,44 @@ def init_placeholder_sheet(wb):
     ws = wb.create_sheet(VALUES_SHEET)
     ws.cell(1, 1, "字段")
     ws.cell(1, 2, "值")
-    for c in (1, 2):
+    ws.cell(1, 3, "来源")
+    for c in (1, 2, 3):
         ws.cell(1, c).font = Font(name=FONT_NAME, size=FONT_SIZE, bold=True)
     ws.column_dimensions["A"].width = 24
     ws.column_dimensions["B"].width = 48
+    ws.column_dimensions["C"].width = 10
     return ws
 
 
-def write_placeholder_sheet(xlsx_path, fields: list[str]) -> list[str]:
+def append_placeholder_sheet(wb, fields: list[str], *, source: str = "全量") -> list[str]:
+    """在工作簿末尾追加缺失字段，不改既有行。"""
+    from openpyxl.styles import Font
+    from .config import FONT_NAME, FONT_SIZE
+
+    created = VALUES_SHEET not in wb.sheetnames
+    ws = init_placeholder_sheet(wb) if created else wb[VALUES_SHEET]
+    if not created and not ws.cell(1, 3).value:
+        ws.cell(1, 3, "来源")
+        ws.cell(1, 3).font = Font(name=FONT_NAME, size=FONT_SIZE, bold=True)
+        ws.column_dimensions["C"].width = 10
+    existing = {str(ws.cell(r, 1).value or "").strip() for r in range(2, (ws.max_row or 1) + 1)}
+    added = []
+    for field in fields:
+        if field not in existing:
+            ws.append([field, "", source])
+            existing.add(field)
+            added.append(field)
+    return added
+
+
+def write_placeholder_sheet(xlsx_path, fields: list[str], *, source: str = "全量") -> list[str]:
     """给工作簿生成/补齐「正文信息」填写骨架，保留已填值；返回新增字段。"""
     from .fsops import backup_file, check_file_free, load_workbook_for_save
 
     check_file_free(xlsx_path, False)
     wb = load_workbook_for_save(xlsx_path)
     created = VALUES_SHEET not in wb.sheetnames
-    ws = init_placeholder_sheet(wb) if created else wb[VALUES_SHEET]
-    existing = {str(ws.cell(r, 1).value or "").strip() for r in range(2, (ws.max_row or 1) + 1)}
-    added = []
-    for field in fields:
-        if field not in existing:
-            ws.append([field, ""])
-            added.append(field)
+    added = append_placeholder_sheet(wb, fields, source=source)
     if added or created:
         backup_file(xlsx_path)
         wb.save(str(xlsx_path))

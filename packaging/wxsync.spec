@@ -13,7 +13,7 @@ from pathlib import Path
 
 TOOLS_ROOT = Path(SPECPATH).resolve().parent  # SPECPATH=packaging → 工具箱根（packaging 在根目录）
 ROOT = TOOLS_ROOT / "excel_word"                     # 各功能命令行与 wesync 包所在
-VERSION = "1.11.1"
+VERSION = "1.11.3"
 DIST_NAME = f"审计工具箱_v{VERSION}"
 
 # 界面入口（无控制台窗口），位于工具箱根目录

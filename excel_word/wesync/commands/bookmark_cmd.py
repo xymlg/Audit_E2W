@@ -12,7 +12,7 @@ import docx
 from openpyxl import load_workbook
 
 from ..align import apply_table_bookmarks, plan_table_bookmarks, split_bookmark_updates
-from ..config import EXCEL_LINK_TEXT, SHEET_NAME
+from ..config import EXCEL_LINK_TEXT, SHEET_NAME, SHEET_NEW_TABLES
 from ..console import log
 from ..docx_bookmarks import cleanup_excel_markers
 from ..docx_grid import body_items
@@ -47,16 +47,23 @@ def cmd_bookmark(args) -> int:
     blocks: dict = {}
     if xlsx_path.exists():
         workbook = load_workbook(str(xlsx_path))
-        if SHEET_NAME in workbook.sheetnames:
-            ws = workbook[SHEET_NAME]
-            _, blocks = parse_blocks(ws)
+        if SHEET_NAME in workbook.sheetnames or SHEET_NEW_TABLES in workbook.sheetnames:
+            for sheet_name in (SHEET_NAME, SHEET_NEW_TABLES):
+                if sheet_name not in workbook.sheetnames:
+                    continue
+                sheet = workbook[sheet_name]
+                _, sheet_blocks = parse_blocks(sheet)
+                for code, block in sheet_blocks.items():
+                    block["sheet_name"] = sheet_name
+                    block["_ws"] = sheet
+                    blocks[code] = block
 
     plan = plan_table_bookmarks(doc, ws, blocks, recorded, name_unmatched=not blocks)
     code_by_index = {index: code for code, index in plan["mapping"].items()}
 
     log(f"读取 Word：{docx_path.name}（{len(doc.tables)} 张表）")
     if blocks:
-        log(f"读取 Excel：{xlsx_path.name}（工作表：{SHEET_NAME}，{len(blocks)} 个表块）")
+        log(f"读取 Excel：{xlsx_path.name}（{len(blocks)} 个表块）")
     else:
         log("未找到可用工作簿：将为每张表新建书签。")
 
@@ -97,7 +104,7 @@ def cmd_bookmark(args) -> int:
     else:
         log("[书签] Word 已是目标状态，无需保存")
 
-    if ws is not None and blocks:
+    if blocks:
         name_by_index = {index: name for index, name in plan["assignments"]}
         infos_by_code: dict[str, dict] = {}
         for code, index in plan["mapping"].items():

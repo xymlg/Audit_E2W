@@ -6,7 +6,7 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.hyperlink import Hyperlink
-from .config import CODE_RE, DELETED_BOOKMARK, FILL_ANCHOR, FILL_CODE_COLUMN, FONT_NAME, FONT_SIZE, MARK_DELETED, MARK_HEADER, MARK_NO, MARK_VALUES, MARK_YES, META_SCAN_COLUMNS, NEW_BOOKMARK, SHEET_NAME
+from .config import CODE_RE, DELETED_BOOKMARK, FILL_ANCHOR, FILL_CODE_COLUMN, FONT_NAME, FONT_SIZE, MARK_DELETED, MARK_HEADER, MARK_NO, MARK_VALUES, MARK_YES, META_SCAN_COLUMNS, NEW_BOOKMARK, SHEET_NAME, SHEET_NEW_TABLES
 from .console import log, warn
 from .fsops import backup_file, load_workbook_for_save
 
@@ -192,8 +192,9 @@ def refresh_defined_names(wb, blocks: dict[str, dict]) -> list[str]:
     """把 EX_Tnn 重新指向各表数据区首行（用户增删行后仍能准确定位）。"""
     changed = []
     for code, block in blocks.items():
+        sheet = block.get("sheet_name") or SHEET_NAME
         letter = get_column_letter(block.get("col0", 2))
-        ref = f"'{SHEET_NAME}'!${letter}${block['anchor_row'] + 1}"
+        ref = f"'{sheet}'!${letter}${block['anchor_row'] + 1}"
         name = f"EX_{code}"
         existing = wb.defined_names.get(name) if hasattr(wb.defined_names, "get") else None
         if existing is not None and existing.attr_text == ref:
@@ -216,10 +217,16 @@ def read_recorded_bookmarks(xlsx_path: Path) -> dict[str, str]:
     except Exception as exc:  # 文件被占用或损坏时不阻断主流程
         warn(f"读取现有工作簿失败（{exc}），本次不沿用旧书签名")
         return {}
-    if SHEET_NAME not in wb.sheetnames:
-        return {}
-    _, blocks = parse_blocks(wb[SHEET_NAME])
-    return {code: block.get("bookmark", "") for code, block in blocks.items() if block.get("bookmark")}
+    result = {}
+    for sheet_name in (SHEET_NAME, SHEET_NEW_TABLES):
+        if sheet_name not in wb.sheetnames:
+            continue
+        _, blocks = parse_blocks(wb[sheet_name])
+        result.update({code: block.get("bookmark", "") for code, block in blocks.items() if block.get("bookmark")})
+    wb.close()
+    if getattr(wb, "vba_archive", None):
+        wb.vba_archive.close()
+    return result
 
 
 def block_merges(ws, block: dict) -> list[tuple[int, int, int, int]]:
@@ -237,151 +244,6 @@ def block_merges(ws, block: dict) -> list[tuple[int, int, int, int]]:
         c2 = min(c2, col0 - 1 + ncols)
         result.append((row_index[r1], c1 - col0, row_index[r2] - row_index[r1] + 1, c2 - c1 + 1))
     return result
-
-
-_CELL_REF_IN_FORMULA_RE = re.compile(r"(?<![A-Za-z0-9_$])(\$?[A-Za-z]{1,3}\$?)(\d+)")
-
-
-def _shift_formula(text: str, idx: int, amount: int) -> str:
-    """按 Excel 插行语义平移公式里的行号：引用行 >= idx 的加 amount（引号内文本不动）。"""
-
-    parts = re.split(r'("[^"]*")', text)
-    for i, part in enumerate(parts):
-        if part.startswith('"'):
-            continue
-
-        def repl(match: re.Match, part: str = part) -> str:
-            if part[match.end():match.end() + 1] == "(":  # LOG10( 这类函数名，不是单元格引用
-                return match.group(0)
-            row = int(match.group(2))
-            return f"{match.group(1)}{row + amount if row >= idx else row}"
-
-        parts[i] = _CELL_REF_IN_FORMULA_RE.sub(repl, part)
-    return "".join(parts)
-
-
-def _insert_rows_safe(ws, idx: int, amount: int) -> None:
-    """在 idx 行前插入 amount 行，并自行搬运合并区/超链接/公式引用/行高。
-
-    openpyxl 的 insert_rows 只搬单元格本体，这些附件不搬或搬错，必须手工处理。
-    """
-    from openpyxl.worksheet.dimensions import RowDimension
-
-    merges = _merged_ranges(ws)
-    for (r1, c1, r2, c2) in merges:
-        ws.unmerge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
-    heights = {
-        r: dim.height for r, dim in ws.row_dimensions.items() if r >= idx and dim.height is not None
-    }
-    ws.insert_rows(idx, amount)
-    for (r1, c1, r2, c2) in merges:
-        if r1 >= idx:
-            r1 += amount
-            r2 += amount
-        elif r2 >= idx:
-            r2 += amount
-        ws.merge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
-    for r in [r for r in ws.row_dimensions if r >= idx]:
-        del ws.row_dimensions[r]
-    for r, height in heights.items():
-        ws.row_dimensions[r + amount] = RowDimension(ws, index=r + amount, height=height, customHeight=True)
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.hyperlink is not None:
-                cell.hyperlink.ref = cell.coordinate
-            if isinstance(cell.value, str) and cell.value.startswith("="):
-                cell.value = _shift_formula(cell.value, idx, amount)
-
-
-def append_new_block(wb, name: str, nrows: int, ncols: int, after: str | None = None) -> str:
-    """在指定表块下面物理插入一个规范的新表块（C 列带「书签：新增」标记），返回表编号。
-
-    ``after`` 指定插到哪张表下面（如 "T02"），不指定时插到最后一张表下面；
-    后续表块整体下移，全部表块按上下顺序重新编号（T01、T02…依次顺延）。
-    Word 建表位置跟随工作簿顺序，即插在哪张表下面就建在哪张表之后。
-    网格预置标准边框与字体：空行也带样式，填数后即可被回写识别为新建 Word 表。
-    """
-    from openpyxl.utils import get_column_letter
-    from .docx_grid import position_sides
-    from .errors import SyncError
-    from .excel_export import make_border
-
-    name = (name or "").strip()
-    if not name:
-        raise SyncError("请填写新表名称")
-    if not 1 <= nrows <= 200 or not 1 <= ncols <= 30:
-        raise SyncError("行数限 1～200、列数限 1～30")
-    if SHEET_NAME not in wb.sheetnames:
-        raise SyncError(f"工作簿中找不到工作表“{SHEET_NAME}”，请确认该文件由本工具导出")
-    ws = wb[SHEET_NAME]
-    order, blocks = parse_blocks(ws)
-    after = (after or "").strip()
-    if after and after not in order:
-        raise SyncError(f"插入位置 {after} 不在工作簿的表编号里，请重新选择")
-    if not after and order:
-        after = order[-1]
-    next_num = max([int(code[1:]) for code in order if code[1:].isdigit()] + [0]) + 1
-    code = f"T{next_num:02d}"
-
-    if after:
-        prev = blocks[after]
-        anchor = max([prev["anchor_row"]] + prev["grid_rows"]) + 2  # 与上一块空一行
-        if anchor <= (ws.max_row or 0):
-            _insert_rows_safe(ws, anchor, nrows + 2)  # 锚点行 + 网格行 + 与下一块的空行
-    else:
-        anchor = (ws.max_row or 0) + 2
-    ws.cell(anchor, 1, code)
-    ws.cell(anchor, 3, f"【新表】{name}")
-    ws.cell(anchor, 4, f"书签：{NEW_BOOKMARK}")
-    ws.cell(anchor, 5, "→定位Word表")
-    ws.cell(anchor, 6, f"列数：{ncols}")
-    for col in range(1, 7):
-        cell = ws.cell(anchor, col)
-        cell.font = Font(name=FONT_NAME, size=FONT_SIZE, bold=True, color="1F4E79")
-        cell.fill = FILL_ANCHOR
-        cell.alignment = Alignment(horizontal="left" if col > 1 else "center", vertical="center")
-
-    borders = {"top": "thin", "bottom": "thin", "left": None, "right": None, "insideH": "dotted", "insideV": "dotted"}
-    for r in range(nrows):
-        grid_row = anchor + 1 + r
-        code_cell = ws.cell(grid_row, 1, code)
-        code_cell.fill = FILL_CODE_COLUMN
-        code_cell.font = Font(name=FONT_NAME, size=FONT_SIZE, color="808080")
-        code_cell.alignment = Alignment(horizontal="center", vertical="center")
-        mark_cell = ws.cell(grid_row, 2, MARK_HEADER if r == 0 else MARK_NO)
-        mark_cell.font = Font(name=FONT_NAME, size=FONT_SIZE, color="808080" if r == 0 else "C00000")
-        mark_cell.alignment = Alignment(horizontal="center", vertical="center")
-        for c in range(ncols):
-            cell = ws.cell(grid_row, 3 + c)
-            cell.font = Font(name=FONT_NAME, size=FONT_SIZE, bold=(r == 0))
-            cell.border = make_border(position_sides(borders, r, c, nrows, ncols))
-            cell.alignment = Alignment(horizontal="center" if r == 0 else "left", vertical="center", wrap_text=True)
-    for c in range(ncols):
-        letter = get_column_letter(3 + c)
-        if letter not in ws.column_dimensions or not ws.column_dimensions[letter].width:
-            ws.column_dimensions[letter].width = 12.0
-
-    # 物理插入后按上下顺序重新编号：A 列、【表N】标签、EX_ 定义名称一起顺延
-    order2, blocks2 = parse_blocks(ws)
-    renamed: dict[str, str] = {}
-    final_blocks: dict[str, dict] = {}
-    for i, old_code in enumerate(order2, 1):
-        new_code = f"T{i:02d}"
-        block = blocks2[old_code]
-        renamed[old_code] = new_code
-        if old_code != new_code:
-            ws.cell(block["anchor_row"], 1, new_code)
-            for r in block["grid_rows"]:
-                ws.cell(r, 1, new_code)
-            label = ws.cell(block["anchor_row"], block["col0"]).value
-            if isinstance(label, str):
-                ws.cell(block["anchor_row"], block["col0"]).value = re.sub(r"【表\d+】", f"【表{i}】", label, count=1)
-        final_blocks[new_code] = block
-    for nm in list(wb.defined_names.keys()):
-        if nm.startswith("EX_") and nm[3:] not in final_blocks:
-            del wb.defined_names[nm]
-    refresh_defined_names(wb, final_blocks)
-    return renamed[code]
 
 
 def rejudge_marks(ws, blocks: dict) -> dict:
@@ -431,6 +293,7 @@ def carry_over_deleted_blocks(wb_new, ws_old, blocks_old: dict) -> list[str]:
     """
     from copy import copy
     from openpyxl.utils import get_column_letter
+    from .sort_rules import _remap_formula
 
     deleted = [b for b in blocks_old.values() if b.get("bookmark") == DELETED_BOOKMARK]
     if not deleted:
@@ -441,6 +304,7 @@ def carry_over_deleted_blocks(wb_new, ws_old, blocks_old: dict) -> list[str]:
     carried: list[str] = []
     new_blocks: dict[str, dict] = {}
     for block in deleted:
+        ws_old = block.get("_ws") or ws_old
         code = f"T{next_num:02d}"
         next_num += 1
         old_anchor = block["anchor_row"]
@@ -461,8 +325,8 @@ def carry_over_deleted_blocks(wb_new, ws_old, blocks_old: dict) -> list[str]:
         link.value = None
         link.hyperlink = None
         grid_rows = []
-        for i, old_row in enumerate(block["grid_rows"]):
-            new_row = anchor + 1 + i
+        rowmap = {old_row: anchor + 1 + i for i, old_row in enumerate(block["grid_rows"])}
+        for old_row, new_row in rowmap.items():
             grid_rows.append(new_row)
             old = ws_old.cell(old_row, 1)
             new = ws.cell(new_row, 1)
@@ -478,7 +342,7 @@ def carry_over_deleted_blocks(wb_new, ws_old, blocks_old: dict) -> list[str]:
             for c in range(block["ncols"]):
                 old = ws_old.cell(old_row, old_col0 + c)
                 new = ws.cell(new_row, 3 + c)
-                new.value = old.value
+                new.value = _remap_formula(old.value, rowmap) if isinstance(old.value, str) and old.value.startswith("=") else old.value
                 if old.has_style:
                     new._style = copy(old._style)
         for (r, c, rs, cs) in block_merges(ws_old, block):
@@ -508,32 +372,38 @@ def refresh_workbook_metadata(
 ) -> int:
     """刷新工作簿里的书签名、跳转链接与列数（不动任何数据单元格）。"""
     wb = load_workbook_for_save(xlsx_path)
-    if SHEET_NAME not in wb.sheetnames:
+    sheets = [(name, wb[name]) for name in (SHEET_NAME, SHEET_NEW_TABLES) if name in wb.sheetnames]
+    if not sheets:
+        wb.close()
         return 0
-    ws = wb[SHEET_NAME]
-    _, blocks = parse_blocks(ws)
     changed = 0
-    for code, block in blocks.items():
-        info = infos_by_code.get(code)
-        if info is None:
-            continue
-        row = block["anchor_row"]
-        col0 = block.get("col0", 2)
-        before = [
-            ws.cell(row, col).value for col in range(1, col0 + 4)
-        ] + [
-            (ws.cell(row, col0 + 2).hyperlink.location if ws.cell(row, col0 + 2).hyperlink else None)
-        ]
-        refresh_anchor_metadata(ws, block, info, docx_name, with_link=with_links, ncols=block["ncols"])
-        after = [
-            ws.cell(row, col).value for col in range(1, col0 + 4)
-        ] + [
-            (ws.cell(row, col0 + 2).hyperlink.location if ws.cell(row, col0 + 2).hyperlink else None)
-        ]
-        if before != after:
-            changed += 1
-            log(f"[定位] {code}：书签/链接已刷新为 {info['bookmark']}")
-    names = refresh_defined_names(wb, blocks)
+    all_blocks: dict[str, dict] = {}
+    for sheet_name, ws in sheets:
+        _, blocks = parse_blocks(ws)
+        for block in blocks.values():
+            block["sheet_name"] = sheet_name
+        all_blocks.update(blocks)
+        for code, block in blocks.items():
+            info = infos_by_code.get(code)
+            if info is None:
+                continue
+            row = block["anchor_row"]
+            col0 = block.get("col0", 2)
+            before = [
+                ws.cell(row, col).value for col in range(1, col0 + 4)
+            ] + [
+                (ws.cell(row, col0 + 2).hyperlink.location if ws.cell(row, col0 + 2).hyperlink else None)
+            ]
+            refresh_anchor_metadata(ws, block, info, docx_name, with_link=with_links, ncols=block["ncols"])
+            after = [
+                ws.cell(row, col).value for col in range(1, col0 + 4)
+            ] + [
+                (ws.cell(row, col0 + 2).hyperlink.location if ws.cell(row, col0 + 2).hyperlink else None)
+            ]
+            if before != after:
+                changed += 1
+                log(f"[定位] {code}：书签/链接已刷新为 {info['bookmark']}")
+    names = refresh_defined_names(wb, all_blocks)
     if changed or names:
         backup = backup_file(xlsx_path)
         wb.save(str(xlsx_path))

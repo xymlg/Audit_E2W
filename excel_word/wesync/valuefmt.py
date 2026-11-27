@@ -1,14 +1,17 @@
 """数值与文本互转：Excel 显示文本渲染、列宽估算、轻量公式求值与公式缓存读取。"""
 
+import ctypes
 import re
+import sys
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles.numbers import is_date_format
 from openpyxl.utils import column_index_from_string
 from openpyxl.utils.datetime import from_excel
-from .config import ARITH_OK_RE, CELL_REF_RE, NUMBER_RE, RANGE_REF_RE, SHEET_NAME, SUM_RE
+from .config import ARITH_OK_RE, CELL_REF_RE, RANGE_REF_RE, SUM_RE
 from .console import warn
 
 
@@ -30,16 +33,22 @@ def decimals_of_format(number_format: str | None) -> int:
     return count
 
 
+_NUMBER_TEXT_RE = re.compile(r"^-?(?:(?:0|[1-9]\d*)|[1-9]\d{0,2}(?:,\d{3})+)(?:\.\d+)?$")
+
+
 def to_excel_value(text: str) -> tuple[object, str | None]:
     """Word 单元格文本 → (Excel 值, 数字格式)。数字文本转真数值，其余保持文本。"""
     stripped = text.strip()
     if stripped == "":
         return None, None
-    if NUMBER_RE.match(stripped):
+    if _NUMBER_TEXT_RE.match(stripped):
         raw = stripped.replace(",", "")
         decimals = len(raw.split(".")[1]) if "." in raw else 0
+        integer_digits = raw.lstrip("-").split(".", 1)[0]
+        if decimals == 0 and len(integer_digits) > 15:  # Excel 只保证 15 位整数精度
+            return text, None
         try:
-            value = float(raw)
+            value = int(raw) if decimals == 0 else float(raw)
         except ValueError:
             return text, None
         number_format = "#,##0" if decimals == 0 else "#,##0." + "0" * decimals
@@ -47,7 +56,20 @@ def to_excel_value(text: str) -> tuple[object, str | None]:
     return text, None
 
 
-def display_text(value: object, number_format: str | None) -> str:
+@lru_cache(maxsize=1)
+def _windows_short_date_format() -> str | None:
+    if sys.platform != "win32":
+        return None
+    try:
+        buffer = ctypes.create_unicode_buffer(128)
+        if ctypes.windll.kernel32.GetLocaleInfoEx(None, 0x1F, buffer, len(buffer)):
+            return buffer.value.replace("M", "m")
+    except Exception:
+        pass
+    return None
+
+
+def display_text(value: object, number_format: str | None, num_fmt_id: int | None = None) -> str:
     """Excel 单元格 → 回写 Word 的显示文本（模拟 Excel 的显示效果）。
 
     覆盖审计常用格式子集：日期/时间（含中文年月日字面量）、千分位有无、小数位、
@@ -55,6 +77,8 @@ def display_text(value: object, number_format: str | None) -> str:
     """
     if value is None:
         return ""
+    if num_fmt_id == 14:
+        number_format = _windows_short_date_format() or number_format
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
     if isinstance(value, timedelta):
@@ -101,6 +125,16 @@ def display_text(value: object, number_format: str | None) -> str:
         _warn_format(fmt)
         return _legacy_number(value, number_format)
     return str(value)
+
+
+_CELL_VALUE = object()
+
+
+def display_cell(cell, value=_CELL_VALUE) -> str:
+    if value is _CELL_VALUE:
+        value = cell.value
+    style = getattr(cell, "_style", None)
+    return display_text(value, cell.number_format, getattr(style, "numFmtId", None))
 
 
 _WARNED_FORMATS: set[str] = set()
@@ -332,15 +366,18 @@ def approx_width(text: str) -> float:
     return width
 
 
-def formula_map(xlsx_path: Path) -> dict[tuple[int, int], object]:
-    """读取带缓存值的副本，用于处理用户在 Excel 中写的公式。"""
+def formula_map(xlsx_path: Path) -> dict[tuple[str, int, int], object]:
+    """读取所有工作表带缓存值的副本，用于处理用户在 Excel 中写的公式。"""
     cached = load_workbook(str(xlsx_path), data_only=True)
-    ws = cached[SHEET_NAME] if SHEET_NAME in cached.sheetnames else cached.worksheets[0]
     result = {}
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.value is not None:
-                result[(cell.row, cell.column)] = cell.value
+    try:
+        for ws in cached.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        result[(ws.title, cell.row, cell.column)] = cell.value
+    finally:
+        cached.close()
     return result
 
 
@@ -353,17 +390,17 @@ def formula_result(ws, row: int, col: int, cached_ws=None):
     return evaluate_formula(ws, row, col, cached_ws)
 
 
-def _cached_value(cached, row: int, col: int):
+def _cached_value(ws, row: int, col: int, cached):
     if cached is None:
         return None
     if hasattr(cached, "cell"):
         return cached.cell(row, col).value
-    return cached.get((row, col))
+    return cached.get((ws.title, row, col))
 
 
 def _cell_numeric(ws, row: int, col: int, cached, depth: int) -> float:
     cell = ws.cell(row, col)
-    value = _cached_value(cached, row, col)
+    value = _cached_value(ws, row, col, cached)
     if value is None:
         value = cell.value
     if isinstance(value, str) and value.startswith("="):

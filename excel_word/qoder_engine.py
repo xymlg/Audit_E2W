@@ -15,19 +15,21 @@ from wesync.errors import SyncError
 
 QUERY_OPERATIONS = {
     "blank-scan", "deleted-list", "blank-batch-scan", "diff", "table-list",
-    "sort-list", "template-scan", "backup-list",
+    "sort-list", "template-scan", "backup-list", "format-scan",
+    "format-heading-candidates",
 }
 RUN_OPERATIONS = {
     "export", "writeback", "bookmark", "rejudge", "clear-bookmarks", "marks",
     "marks-sync", "placeholders", "placeholders-sync", "blank-delete",
-    "restore-tables", "blank-batch-delete", "diff-export", "append-table",
+    "restore-tables", "blank-batch-delete", "diff-export", "incremental-export",
     "sort-set", "sort-clear", "batch-writeback", "template-batch",
-    "fill-placeholders", "backup-restore",
+    "fill-placeholders", "backup-restore", "format-apply",
 }
 DRY_RUN_OPERATIONS = {
     "export", "writeback", "bookmark", "rejudge", "clear-bookmarks", "marks",
     "marks-sync", "placeholders", "placeholders-sync", "blank-delete",
-    "restore-tables", "blank-batch-delete", "batch-writeback", "template-batch",
+    "restore-tables", "blank-batch-delete", "batch-writeback", "template-batch", "incremental-export",
+    "format-apply",
 }
 
 
@@ -175,6 +177,43 @@ def _blank_batch_items(request: dict) -> list[dict]:
     return result
 
 
+def _format_args(request: dict) -> dict:
+    profile_name = request.get("profileName")
+    if profile_name is not None and (not isinstance(profile_name, str) or not profile_name.strip()):
+        raise SyncError("profileName 必须是非空文本")
+    levels = request.get("headingLevels")
+    if levels is not None:
+        if not isinstance(levels, dict) or len(levels) > 300:
+            raise SyncError("headingLevels 必须是候选编号到 1～4 级标题的映射，且最多 300 项")
+        if any(not isinstance(key, str) or type(value) is not int or not 1 <= value <= 4 for key, value in levels.items()):
+            raise SyncError("headingLevels 的级别必须是 1～4 的整数")
+    batch_id = request.get("headingBatchId")
+    if batch_id is not None and (not isinstance(batch_id, str) or not batch_id):
+        raise SyncError("headingBatchId 必须是非空文本")
+    role_batch_id = request.get("roleBatchId")
+    if role_batch_id is not None and (not isinstance(role_batch_id, str) or not role_batch_id):
+        raise SyncError("roleBatchId 必须是非空文本")
+    role_overrides = request.get("roleOverrides")
+    if role_overrides is not None:
+        if not isinstance(role_overrides, dict) or len(role_overrides) > 300:
+            raise SyncError("roleOverrides 必须是最多 300 项的疑难角色映射")
+        if any(not isinstance(key, str) or value not in ("body", "table_title") for key, value in role_overrides.items()):
+            raise SyncError("roleOverrides 的角色只能是 body 或 table_title")
+    region_start_id = request.get("regionStartId")
+    if region_start_id is not None and (not isinstance(region_start_id, str) or not region_start_id):
+        raise SyncError("regionStartId 必须是非空文本")
+    return {
+        "template": _optional_path(request, "template", (".docx", ".docm")),
+        "profile_name": profile_name.strip() if profile_name is not None else None,
+        "scope": request.get("scope"),
+        "heading_batch_id": batch_id,
+        "heading_levels": levels,
+        "role_batch_id": role_batch_id,
+        "role_overrides": role_overrides,
+        "region_start_id": region_start_id,
+    }
+
+
 def _dispatch(request: dict):
     operation = request["operation"]
     docx = _optional_path(request, "docx", (".docx", ".docm"))
@@ -183,6 +222,8 @@ def _dispatch(request: dict):
     force = _flag(request, "force")
     if dry_run and operation not in DRY_RUN_OPERATIONS:
         raise SyncError("该操作不支持预演")
+    if operation in RUN_OPERATIONS and not dry_run and not _flag(request, "confirmed"):
+        raise SyncError("正式写盘前必须取得用户确认，并传 confirmed=true")
 
     if operation in QUERY_OPERATIONS:
         if operation == "blank-scan":
@@ -204,6 +245,21 @@ def _dispatch(request: dict):
             return api.scan_template_placeholders(_required_path(request, "docx", (".docx", ".docm")))
         if operation == "backup-list":
             return api.scan_backups(_required_path(request, "docx", (".docx", ".docm")), excel)
+        if operation == "format-heading-candidates":
+            return api.scan_format_heading_candidates(_required_path(request, "docx", (".docx", ".docm")))
+        if operation == "format-scan":
+            return api.scan_report_format(
+                _required_path(request, "docx", (".docx", ".docm")),
+                **_format_args(request),
+            )
+
+    if operation == "format-apply":
+        return api.run_report_format(
+            _required_path(request, "docx", (".docx", ".docm")),
+            output=_optional_path(request, "output", (".docx", ".docm")),
+            dry_run=dry_run,
+            **_format_args(request),
+        )
 
     if operation == "backup-restore":
         backup = _required_path(request, "backupPath", (".docx", ".docm", ".xlsx", ".xlsm"))
@@ -299,13 +355,12 @@ def _dispatch(request: dict):
     if operation == "diff-export":
         records = api.scan_writeback_diff(docx, excel)
         return api.export_diff_report(docx, excel, records)
-    if operation == "append-table":
-        return api.run_append_table_block(
-            docx, excel,
-            name=_text(request, "name", "表名"),
-            nrows=_integer(request, "nrows", "行数", 1, 200),
-            ncols=_integer(request, "ncols", "列数", 1, 30),
-            after=request.get("after") or None,
+    if operation == "incremental-export":
+        return api.run_incremental_export(
+            docx, excel, dry_run=dry_run, force=force,
+            with_excel_links=_flag(request, "withExcelLinks", True),
+            totals_formula=_flag(request, "totalsFormula", True),
+            backup=_flag(request, "backup", True),
         )
     if operation == "sort-set":
         return api.set_table_sort(

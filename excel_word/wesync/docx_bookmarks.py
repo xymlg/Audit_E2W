@@ -18,11 +18,18 @@ def bookmark_names(root) -> set[str]:
 
 def used_bookmark_ids(doc) -> set[int]:
     ids = set()
-    for el in doc.element.body.iter():
-        if el.tag in (qn("w:bookmarkStart"), qn("w:bookmarkEnd")):
-            value = el.get(qn("w:id"))
-            if value and value.lstrip("-").isdigit():
-                ids.add(int(value))
+    roots = [doc.element.body]
+    for section in doc.sections:
+        roots.extend(part._element for part in (
+            section.header, section.footer, section.first_page_header, section.first_page_footer,
+            section.even_page_header, section.even_page_footer,
+        ) if part is not None)
+    for root in roots:
+        for el in root.iter():
+            if el.tag in (qn("w:bookmarkStart"), qn("w:bookmarkEnd")):
+                value = el.get(qn("w:id"))
+                if value and value.lstrip("-").isdigit():
+                    ids.add(int(value))
     return ids
 
 

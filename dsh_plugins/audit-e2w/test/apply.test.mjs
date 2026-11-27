@@ -1,6 +1,15 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { apply } from "../lib/index.js"
+import { skillContent } from "../lib/skill.js"
+
+test("bundled skill covers format workflow and safety boundaries", () => {
+  for (const required of [
+    "31 个操作", "format-scan", "format-heading-candidates", "format-apply",
+    "headingLevels", "roleOverrides", "regionStartId", "confirmed=true",
+    "不得读取或上传整篇报告", "visual_review", "绝不覆盖原报告",
+  ]) assert.match(skillContent, new RegExp(required.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+})
 
 test("plugin registers four tools and the optional skill with cleanup", async () => {
   const registered = []

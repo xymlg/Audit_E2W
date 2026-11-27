@@ -21,9 +21,9 @@ assert.ok(manifest.files.includes("dsh_plugins/audit-e2w/lib/*.mjs"), "DSH åŒ…æ¸
 assert.equal(manifest.scripts.preinstall, undefined)
 assert.equal(manifest.scripts.install, undefined)
 assert.equal(manifest.scripts.postinstall, undefined)
-assert.equal(queryOperations.length + runOperations.length, 28)
-assert.equal(Object.keys(operationSpecs).length, 28)
-assert.equal(new Set([...queryOperations, ...runOperations]).size, 28)
+assert.equal(queryOperations.length + runOperations.length, 31)
+assert.equal(Object.keys(operationSpecs).length, 31)
+assert.equal(new Set([...queryOperations, ...runOperations]).size, 31)
 for (const operation of queryOperations) assert.equal(operationSpecs[operation].writes, false)
 for (const operation of runOperations) assert.equal(operationSpecs[operation].writes, true)
 
@@ -46,4 +46,4 @@ for (const item of ["dsh_plugins/audit-e2w/lib/index.js", "dsh_plugins/audit-e2w
   const source = readFileSync(path.join(root, item), "utf8")
   assert.doesNotMatch(source, new RegExp(["E:\\\\15\\.qoder", "C:\\\\Users\\\\", ["App", "Data"].join(""), "api[_-]?key\\s*[:=]\\s*[\"'][^\"']+[\"']"].join("|"), "i"))
 }
-console.log(`Audit_E2W ${manifest.version}: DSH package structure OK (28 operations).`)
+console.log(`Audit_E2W ${manifest.version}: DSH package structure OK (31 operations).`)

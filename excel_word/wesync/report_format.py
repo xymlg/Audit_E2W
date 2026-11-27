@@ -78,6 +78,7 @@ ROLE_LABELS = {
     "heading_4": "四级标题",
     "statement": "报表名称/日期",
     "table_title": "表格标题",
+    "table_continuation": "续表标题",
     "body": "正文",
     "table_header": "表头",
     "table_total": "合计行",
@@ -91,12 +92,21 @@ SCOPE_LABELS = {
     "body": "正文段落",
     "table_text": "表格字体与字号",
     "table_emphasis": "表格对齐、表头与合计行加粗",
+    "table_borders": "表格框线",
 }
 DEFAULT_SCOPE = {key: True for key in SCOPE_LABELS}
+VISUAL_REVIEW = [
+    "封面：公司名、报告名、期间和单位说明的层次是否与样板一致。",
+    "标题：首个一级标题及后续各级标题的字体、缩进和编号是否正常。",
+    "正文：普通段落字号、行距和两端对齐是否正常，有无异常缩小。",
+    "表题：金额单位、表名与引导正文是否分清，续表标签位置是否正确。",
+    "宽表格：列宽、换行、合计行和框线是否完整，有无超出页面。",
+    "分页：封面、目录、正文和表格附近有无空白页、孤行或错位。",
+]
 PARAGRAPH_SCOPE_ROLES = {
     "cover": ("cover_title", "cover_info", "toc_title", "toc_entry"),
     "headings": ("heading_1", "heading_2", "heading_3", "heading_4"),
-    "statement": ("statement", "table_title"),
+    "statement": ("statement", "table_title", "table_continuation"),
     "body": ("body",),
 }
 
@@ -117,6 +127,41 @@ ALIGN_LABELS = {
     "distribute": "分散对齐",
 }
 
+BORDER_EDGES = ("top", "left", "bottom", "right", "insideH", "insideV")
+BORDER_EDGE_LABELS = {
+    "top": "上外框",
+    "left": "左外框",
+    "bottom": "下外框",
+    "right": "右外框",
+    "insideH": "内部横线",
+    "insideV": "内部竖线",
+}
+BORDER_VALUES = {
+    "nil", "none", "single", "dashSmallGap", "dotted", "dotDash", "dotDotDash",
+    "double", "wave", "dashLargeGap", "dashDotGap", "thinThick",
+    "mediumDashSmallGap", "mediumDotDash", "mediumDashDotGap", "mediumThickSmallGap",
+    "slantDashDot",
+}
+BORDER_STYLE_LABELS = {
+    "nil": "无框线",
+    "none": "无框线",
+    "single": "实线",
+    "dashSmallGap": "短虚线",
+    "dotted": "点线",
+    "dotDash": "点划线",
+    "dotDotDash": "双点划线",
+    "double": "双线",
+    "wave": "波浪线",
+    "dashLargeGap": "长虚线",
+    "dashDotGap": "划线点线",
+    "thinThick": "一细一粗",
+    "mediumDashSmallGap": "中短虚线",
+    "mediumDotDash": "中点划线",
+    "mediumDashDotGap": "中划线点线",
+    "mediumThickSmallGap": "中一细一粗",
+    "slantDashDot": "斜点划线",
+}
+
 
 @dataclass
 class ParagraphFormat:
@@ -133,12 +178,20 @@ class ParagraphFormat:
     left: float | None = None
 
 
+@dataclass(frozen=True)
+class BorderFormat:
+    val: str = "nil"
+    size: float = 0.0
+    color: str | None = None
+
+
 @dataclass
 class FormatProfile:
     paragraphs: dict[str, ParagraphFormat] = field(default_factory=dict)
     table_ascii_font: str = "Times New Roman"
     table_east_asia_font: str = "宋体"
     table_size: float = 9.0
+    table_borders: dict[str, BorderFormat] | None = None
     template: str = ""
 
 
@@ -152,7 +205,7 @@ def _validated_scope(scope: dict | None) -> dict[str, bool]:
     if scope is None:
         return dict(DEFAULT_SCOPE)
     if not isinstance(scope, dict) or set(scope) != set(DEFAULT_SCOPE):
-        raise SyncError("调整项目必须完整包含六项，且不能包含未知项目")
+        raise SyncError("调整项目必须完整包含七项，且不能包含未知项目")
     if any(type(scope[key]) is not bool for key in DEFAULT_SCOPE):
         raise SyncError("调整项目的选择必须为“是”或“否”")
     if not any(scope.values()):
@@ -183,7 +236,7 @@ def _profile_path(name: str) -> Path:
 
 
 def _profile_data(profile: FormatProfile, name: str) -> dict:
-    return {
+    data = {
         "version": 1,
         "name": name,
         "paragraphs": {role: asdict(fmt) for role, fmt in profile.paragraphs.items()},
@@ -191,6 +244,32 @@ def _profile_data(profile: FormatProfile, name: str) -> dict:
         "table_east_asia_font": profile.table_east_asia_font,
         "table_size": profile.table_size,
     }
+    if profile.table_borders is not None:
+        data["table_borders"] = {edge: asdict(fmt) for edge, fmt in profile.table_borders.items()}
+    return data
+
+
+def _validated_borders(data) -> dict[str, BorderFormat] | None:
+    if data is None:
+        return None
+    if not isinstance(data, dict) or set(data) != set(BORDER_EDGES):
+        raise SyncError("格式方案表格框线数据不完整")
+    result = {}
+    for edge in BORDER_EDGES:
+        values = data[edge]
+        if not isinstance(values, dict) or set(values) != {"val", "size", "color"}:
+            raise SyncError("格式方案表格框线字段不正确")
+        val = values["val"]
+        size = values["size"]
+        color = values["color"]
+        if not isinstance(val, str) or val not in BORDER_VALUES:
+            raise SyncError("格式方案表格框线类型不正确")
+        if isinstance(size, bool) or not isinstance(size, (int, float)) or not math.isfinite(size) or not 0 <= size <= 96:
+            raise SyncError("格式方案表格框线粗细不正确")
+        if color is not None and (not isinstance(color, str) or (color.lower() != "auto" and not re.fullmatch(r"[0-9a-fA-F]{6}", color))):
+            raise SyncError("格式方案表格框线颜色不正确")
+        result[edge] = BorderFormat(val, float(size), color)
+    return result
 
 
 def _validated_profile(data: dict) -> FormatProfile:
@@ -225,16 +304,18 @@ def _validated_profile(data: dict) -> FormatProfile:
         if fmt.bold is not None and not isinstance(fmt.bold, bool):
             raise SyncError("格式方案加粗属性类型不正确")
         parsed[role] = fmt
-    required_roles = set(ROLE_LABELS) - {"table_header", "table_total", "table_data"}
-    if set(parsed) != required_roles:
+    required_roles = set(ROLE_LABELS) - {"table_header", "table_total", "table_data", "table_continuation"}
+    if not required_roles <= set(parsed) or set(parsed) - (required_roles | {"table_continuation"}):
         raise SyncError("格式方案段落角色不完整")
+    if "table_continuation" not in parsed:
+        parsed["table_continuation"] = _default_formats()["table_continuation"]
     fonts = (data.get("table_ascii_font"), data.get("table_east_asia_font"))
     size = data.get("table_size")
     if any(not isinstance(font, str) or not font for font in fonts):
         raise SyncError("格式方案缺少表格字体")
     if isinstance(size, bool) or not isinstance(size, (int, float)) or not math.isfinite(size) or size <= 0:
         raise SyncError("格式方案表格字号不正确")
-    return FormatProfile(parsed, fonts[0], fonts[1], float(size))
+    return FormatProfile(parsed, fonts[0], fonts[1], float(size), _validated_borders(data.get("table_borders")))
 
 
 def list_format_profiles() -> list[dict]:
@@ -251,11 +332,11 @@ def list_format_profiles() -> list[dict]:
     return result
 
 
-def save_format_profile(template: str | Path, name: str) -> dict:
+def save_format_profile(template: str | Path, name: str, source: str | Path | None = None) -> dict:
     path = _profile_path(name)
     if path.exists():
         raise SyncError(f"格式方案已存在，未覆盖：{name}")
-    profile = build_profile(template)
+    profile = build_profile(template, source)
     data = _profile_data(profile, name.strip())
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".json", dir=path.parent)
     try:
@@ -308,6 +389,7 @@ def _on_off(element) -> bool | None:
 
 
 _STYLE_CACHE: WeakKeyDictionary = WeakKeyDictionary()
+_DEFAULTS_CACHE: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def _style_data(paragraph: Paragraph):
@@ -358,35 +440,68 @@ def _style_chain(paragraph: Paragraph, style) -> list:
     return chains[key]
 
 
+def _doc_defaults(paragraph: Paragraph) -> tuple:
+    part = paragraph.part
+    cached = _DEFAULTS_CACHE.get(part)
+    if cached is not None:
+        return cached
+    defaults = part.styles.element.find(qn("w:docDefaults"))
+    run_defaults = defaults.find(qn("w:rPrDefault")) if defaults is not None else None
+    paragraph_defaults = defaults.find(qn("w:pPrDefault")) if defaults is not None else None
+    cached = (
+        run_defaults.find(qn("w:rPr")) if run_defaults is not None else None,
+        paragraph_defaults.find(qn("w:pPr")) if paragraph_defaults is not None else None,
+    )
+    _DEFAULTS_CACHE[part] = cached
+    return cached
+
+
+def _property_containers(paragraph: Paragraph, name: str, run: Run | None) -> list:
+    paragraph_property = name in ("spacing", "ind", "jc", "outlineLvl")
+    if paragraph_property:
+        containers = [paragraph._p.pPr]
+        containers.extend(
+            style.find(qn("w:pPr"))
+            for style in _style_chain(paragraph, _paragraph_style(paragraph))
+        )
+        default = _doc_defaults(paragraph)[1]
+    else:
+        containers = []
+        if run is not None:
+            containers.append(run._r.rPr)
+            containers.extend(_style_chain(paragraph, _run_style(paragraph, run)))
+        containers.extend(
+            style.find(qn("w:rPr"))
+            for style in _style_chain(paragraph, _paragraph_style(paragraph))
+        )
+        default = _doc_defaults(paragraph)[0]
+    containers.append(default)
+    return [container for container in containers if container is not None]
+
+
 def _find_property(paragraph: Paragraph, name: str, run: Run | None = None):
-    containers = []
-    if run is not None:
-        containers.append(run._r.rPr)
-        containers.extend(_style_chain(paragraph, _run_style(paragraph, run)))
-    containers.append(paragraph._p.pPr)
-    containers.extend(_style_chain(paragraph, _paragraph_style(paragraph)))
-    for element in containers:
-        if element is None:
-            continue
-        container = element
-        if element.tag == qn("w:style") and name in ("spacing", "ind", "jc", "outlineLvl"):
-            container = element.find(qn("w:pPr"))
-            if container is None:
-                continue
+    for container in _property_containers(paragraph, name, run):
         found = container.find(qn(f"w:{name}"))
         if found is not None:
             return found
     return None
 
 
+def _font_attribute(paragraph: Paragraph, names: tuple[str, ...], run: Run | None) -> str | None:
+    for container in _property_containers(paragraph, "rFonts", run):
+        fonts = container.find(qn("w:rFonts"))
+        if fonts is not None:
+            for name in names:
+                value = fonts.get(qn(f"w:{name}"))
+                if value:
+                    return value
+    return None
+
+
 def _effective_paragraph_format(paragraph: Paragraph) -> ParagraphFormat:
     run = next((item for item in paragraph.runs if item.text.strip()), None)
-    fonts = _find_property(paragraph, "rFonts", run)
-    ascii_font = None
-    east_asia_font = None
-    if fonts is not None:
-        ascii_font = fonts.get(qn("w:ascii")) or fonts.get(qn("w:hAnsi"))
-        east_asia_font = fonts.get(qn("w:eastAsia"))
+    ascii_font = _font_attribute(paragraph, ("ascii", "hAnsi"), run)
+    east_asia_font = _font_attribute(paragraph, ("eastAsia",), run)
     spacing = _find_property(paragraph, "spacing")
     line_rule = spacing.get(qn("w:lineRule")) if spacing is not None else None
     line_value = _number(spacing, "line")
@@ -460,27 +575,112 @@ def _normalized_text(paragraph: Paragraph) -> str:
     return re.sub(r"\s+", "", paragraph.text)
 
 
-def _classify_paragraphs(doc) -> tuple[list[tuple[Paragraph, str]], dict[str, int]]:
-    paragraphs = [item for item in _body_items(doc) if isinstance(item, Paragraph)]
+def _region_entries(doc, region: tuple[int, int] | None):
+    children = list(doc.element.body.iterchildren())
+    indexes = range(len(children)) if region is None else range(*region)
+    for index in indexes:
+        child = children[index]
+        if child.tag == qn("w:p"):
+            yield index, Paragraph(child, doc)
+        elif child.tag == qn("w:tbl"):
+            yield index, Table(child, doc)
+
+
+def _region_items(doc, region: tuple[int, int] | None):
+    for _, item in _region_entries(doc, region):
+        yield item
+
+
+def _notes_region(doc) -> tuple[int, int] | None:
+    children = list(doc.element.body.iterchildren())
+    for index, child in enumerate(children):
+        if child.tag != qn("w:p"):
+            continue
+        title = _normalized_text(Paragraph(child, doc))
+        combined_title = bool(re.match(r"^\d{4}\s*年.*财务报表附注$", title))
+        if title != "财务报表附注" and not combined_title:
+            continue
+        following = next(
+            (
+                Paragraph(item, doc)
+                for item in children[index + 1:]
+                if item.tag == qn("w:p") and Paragraph(item, doc).text.strip()
+            ),
+            None,
+        )
+        if following is None:
+            continue
+        following_text = following.text.strip()
+        if not combined_title and not re.match(r"^\d{4}\s*年.*(?:年度|年)$", following_text):
+            continue
+        if combined_title and not ("金额单位" in following_text or ("本附注" in following_text and "单位" in following_text)):
+            continue
+        start = index
+        for previous in range(index - 1, max(-1, index - 4), -1):
+            if children[previous].tag == qn("w:p") and Paragraph(children[previous], doc).text.strip():
+                start = previous
+                break
+        return start, len(children)
+    return None
+
+
+def _region_tables(doc, region: tuple[int, int] | None) -> list[Table]:
+    return [item for item in _region_items(doc, region) if isinstance(item, Table)]
+
+
+def _is_table_continuation(text: str) -> bool:
+    return bool(re.fullmatch(r"[（(]?(?:续上表|续下表|续表)[）)]?", re.sub(r"\s+", "", text)))
+
+
+def _is_table_caption(text: str) -> bool:
+    value = re.sub(r"\s+", "", text)
+    if _is_table_continuation(value):
+        return True
+    if re.match(r"^(?:金额)?单位[：:]", value):
+        return True
+    return bool(re.match(r"^(?:表|图表)\d+(?:[.．、]|\s|[^\d])", value) and len(value) <= 80)
+
+
+def _classify_paragraphs(
+    doc,
+    paragraph_overrides: dict[int, str] | None = None,
+    region: tuple[int, int] | None = None,
+) -> tuple[list[tuple[Paragraph, str]], dict[str, int]]:
+    entries = list(_region_entries(doc, region))
+    items = [item for _, item in entries]
+    paragraphs = [item for item in items if isinstance(item, Paragraph)]
+    paragraph_indexes = [index for index, item in entries if isinstance(item, Paragraph)]
     nonempty = [item for item in paragraphs if item.text.strip()]
+    positions = {paragraph._p: index for index, paragraph in enumerate(nonempty)}
     heading_roles = [_heading_role(item) for item in nonempty]
+    for element_index, role in (paragraph_overrides or {}).items():
+        position = positions.get(doc.element.body[element_index])
+        if position is not None and role.startswith("heading_"):
+            heading_roles[position] = role
     heading_indexes = [index for index, role in enumerate(heading_roles) if role]
     toc_index = next((index for index, item in enumerate(nonempty) if _normalized_text(item) == "目录"), None)
     first_heading = heading_indexes[0] if heading_indexes else len(nonempty)
-    if toc_index is not None:
+    if region is not None:
+        cover_end = min(first_heading, 4)
+    elif toc_index is not None:
         cover_end = toc_index
     else:
         cover_end = min(first_heading, 3)
+        if first_heading == len(nonempty):
+            numbered = next((index for index, item in enumerate(nonempty) if index and _HEADING_NUMBER_RE.match(item.text.strip())), None)
+            if numbered is not None:
+                cover_end = min(cover_end, numbered)
     toc_end = len(nonempty)
     if toc_index is not None:
         later = [index for index in heading_indexes if index > toc_index]
         toc_end = later[0] if later else len(nonempty)
 
     table_titles: set[int] = set()
+    table_continuations: set[int] = set()
     previous: Paragraph | None = None
     previous_index = -1
     position = -1
-    for item in _body_items(doc):
+    for item in items:
         if isinstance(item, Paragraph):
             if item.text.strip():
                 position += 1
@@ -489,7 +689,7 @@ def _classify_paragraphs(doc) -> tuple[list[tuple[Paragraph, str]], dict[str, in
             continue
         if previous is None or not previous.text.strip() or heading_roles[previous_index]:
             continue
-        if DATE_RE.match(previous.text.strip()):
+        if DATE_RE.match(previous.text.strip()) or not _is_table_caption(previous.text):
             continue
         index = previous_index
         if index < cover_end:
@@ -497,24 +697,240 @@ def _classify_paragraphs(doc) -> tuple[list[tuple[Paragraph, str]], dict[str, in
         if toc_index is not None and toc_index <= index < toc_end:
             continue
         table_titles.add(index)
+        if _is_table_continuation(previous.text):
+            table_continuations.add(index)
+
+    notes_title_count = 2
+    if region is not None and len(nonempty) > 2 and re.match(r"^\d{4}\s*年.*(?:年度|年)$", nonempty[2].text.strip()):
+        notes_title_count = 3
 
     result: list[tuple[Paragraph, str]] = []
     ambiguous = 0
     for index, paragraph in enumerate(nonempty):
         role = heading_roles[index]
+        role = (paragraph_overrides or {}).get(paragraph_indexes[index]) or role
         if role is None and (_outline_level(paragraph) or 0) > 4:
             ambiguous += 1
         if role is None and index in table_titles:
-            role = "table_title"
+            role = "table_continuation" if index in table_continuations else "table_title"
         if role is None and toc_index is not None:
             if index == toc_index:
                 role = "toc_title"
             elif toc_index < index < toc_end:
                 role = "toc_entry"
         if role is None and index < cover_end:
-            role = "cover_title" if index < min(3, cover_end) else "cover_info"
+            title = region is not None and index < notes_title_count
+            role = "cover_title" if title or (region is None and index < min(3, cover_end)) else "cover_info"
         result.append((paragraph, role or "body"))
     return result, {"ambiguous": ambiguous, "empty": len(paragraphs) - len(nonempty)}
+
+
+_HEADING_NUMBER_RE = re.compile(
+    r"^(?:第[一二三四五六七八九十百\d]+[章节部分篇]|[一二三四五六七八九十百]+[、.．]|"
+    r"[（(]?[一二三四五六七八九十百]+[）)]?|[（(]\d+[）)]|\d+(?:\.\d+)*[、.．)）]?)\s*\S"
+)
+
+
+def _context_text(paragraph: Paragraph | None) -> str:
+    return re.sub(r"\s+", " ", paragraph.text).strip()[:100] if paragraph is not None else ""
+
+
+def _candidate_id(element_index: int, paragraph: Paragraph) -> str:
+    digest = hashlib.sha256(_normalized_text(paragraph).encode("utf-8")).hexdigest()[:10]
+    return f"b{element_index:04d}-{digest}"
+
+
+def _candidate_record(element_index: int, paragraph: Paragraph, paragraphs: list[Paragraph], position: int) -> dict:
+    text = re.sub(r"\s+", " ", paragraph.text).strip()
+    fmt = _effective_paragraph_format(paragraph)
+    return {
+        "id": _candidate_id(element_index, paragraph),
+        "element_index": element_index,
+        "text": text,
+        "before": _context_text(paragraphs[position - 1] if position else None),
+        "after": _context_text(paragraphs[position + 1] if position + 1 < len(paragraphs) else None),
+        "style": paragraph.style.name if paragraph.style is not None else "",
+        "bold": fmt.bold,
+        "size": fmt.size,
+        "align": ALIGN_LABELS.get(fmt.align, fmt.align or "默认"),
+        "numbered": bool(_HEADING_NUMBER_RE.match(text)),
+    }
+
+
+def _format_candidate_package(doc, fingerprint: str) -> dict:
+    region = _notes_region(doc)
+    entries = list(_region_entries(doc, region))
+    paragraph_entries = [(index, item) for index, item in entries if isinstance(item, Paragraph) and item.text.strip()]
+    paragraphs = [item for _, item in paragraph_entries]
+    positions = {paragraph._p: index for index, paragraph in enumerate(paragraphs)}
+    classified, _ = _classify_paragraphs(doc, region=region)
+    roles = {paragraph._p: role for paragraph, role in classified}
+    toc_index = next((index for index, item in enumerate(paragraphs) if _normalized_text(item) == "目录"), None)
+    content_start = 0
+    if toc_index is not None:
+        content_start = toc_index + 1
+        while content_start < len(paragraphs):
+            text = re.sub(r"\s+", " ", paragraphs[content_start].text).strip()
+            style_name = paragraphs[content_start].style.name if paragraphs[content_start].style is not None else ""
+            if "toc" not in style_name.lower() and "目录" not in style_name and not re.search(r"(?:\.{2,}|…{2,}|\t)|\s\d+$", text):
+                break
+            content_start += 1
+
+    candidates = []
+    truncated = False
+    for element_index, paragraph in paragraph_entries:
+        index = positions[paragraph._p]
+        text = re.sub(r"\s+", " ", paragraph.text).strip()
+        level = _outline_level(paragraph)
+        if roles[paragraph._p] not in ("body", "toc_entry") or index < content_start or level is not None or not 2 <= len(text) <= 120:
+            continue
+        if DATE_RE.match(text) or re.search(r"[。；;！!？?]$", text):
+            continue
+        fmt = _effective_paragraph_format(paragraph)
+        visual = fmt.bold is True or fmt.align == "center" or (fmt.size is not None and fmt.size >= 14)
+        if not _HEADING_NUMBER_RE.match(text) and not (visual and len(text) <= 60):
+            continue
+        candidates.append(_candidate_record(element_index, paragraph, paragraphs, index))
+        if len(candidates) == 300:
+            truncated = True
+            break
+
+    heading_ids = {item["id"] for item in candidates}
+    role_candidates = []
+    previous: tuple[int, Paragraph] | None = None
+    for element_index, item in entries:
+        if isinstance(item, Paragraph):
+            if item.text.strip():
+                previous = (element_index, item)
+            continue
+        if previous is None:
+            continue
+        previous_index, paragraph = previous
+        if len(candidates) >= 300:
+            if roles[paragraph._p] == "body" and _outline_level(paragraph) is None and _candidate_id(previous_index, paragraph) not in heading_ids:
+                truncated = True
+            continue
+        if roles[paragraph._p] != "body" or _outline_level(paragraph) is not None or _candidate_id(previous_index, paragraph) in heading_ids:
+            continue
+        text = re.sub(r"\s+", " ", paragraph.text).strip()
+        if not 2 <= len(text) <= 120 or DATE_RE.match(text):
+            continue
+        record = _candidate_record(previous_index, paragraph, paragraphs, positions[paragraph._p])
+        record.update({
+            "kind": "table_role",
+            "current_role": "body",
+            "options": ["body", "table_title"],
+            "next_element": "表格（未读取单元格内容）",
+        })
+        role_candidates.append(record)
+        candidates.append(record)
+
+    children = list(doc.element.body.iterchildren())
+    boundary_indexes: list[int] = []
+    if region is not None:
+        boundary_indexes = list(range(max(0, region[0] - 3), min(len(children), region[0] + 5)))
+    else:
+        for index, child in enumerate(children):
+            if child.tag == qn("w:p") and "财务报表附注" in Paragraph(child, doc).text:
+                boundary_indexes.append(index)
+                previous_index = next((i for i in range(index - 1, max(-1, index - 4), -1) if children[i].tag == qn("w:p") and Paragraph(children[i], doc).text.strip()), None)
+                if previous_index is not None:
+                    boundary_indexes.append(previous_index)
+            if len(boundary_indexes) >= 8:
+                break
+    all_paragraphs = [Paragraph(child, doc) for child in children if child.tag == qn("w:p") and Paragraph(child, doc).text.strip()]
+    all_positions = {paragraph._p: index for index, paragraph in enumerate(all_paragraphs)}
+    boundary_candidates = []
+    for element_index in dict.fromkeys(boundary_indexes):
+        child = children[element_index]
+        if child.tag != qn("w:p"):
+            continue
+        paragraph = Paragraph(child, doc)
+        if not paragraph.text.strip():
+            continue
+        record = _candidate_record(element_index, paragraph, all_paragraphs, all_positions[paragraph._p])
+        record.update({
+            "kind": "region_start",
+            "current_role": roles.get(paragraph._p, "区外"),
+            "current_boundary": region is not None and element_index == region[0],
+        })
+        boundary_candidates.append(record)
+
+    ids = ",".join(item["id"] for item in candidates + boundary_candidates)
+    batch_id = hashlib.sha256(f"{fingerprint}|{ids}".encode("ascii")).hexdigest()[:24]
+    return {
+        "batch_id": batch_id,
+        "candidates": [item for item in candidates if item.get("kind") != "table_role"],
+        "role_candidates": role_candidates,
+        "boundary_candidates": boundary_candidates,
+        "candidate_count": len(candidates),
+        "truncated": truncated,
+        "privacy": "仅含本地筛出的候选标题、表格前段落、附注边界及前后各最多100字；不含整篇报告或表格单元格。",
+        "apply_mode": "只应用用户确认的直接排版和附注起始边界，不写标题样式、不改大纲级别、不更新目录。",
+    }
+
+
+def scan_heading_candidates(docx: str | Path) -> dict:
+    source = resolve_docx(str(docx))
+    fingerprint = hashlib.sha256(source.read_bytes()).hexdigest()
+    return _format_candidate_package(_open_document(source), fingerprint)
+
+
+def _validated_format_overrides(
+    doc,
+    fingerprint: str,
+    heading_batch_id: str | None,
+    levels: dict | None,
+    role_batch_id: str | None,
+    role_overrides: dict | None,
+    region_start_id: str | None,
+) -> tuple[tuple[int, int] | None, dict[int, str]]:
+    package = _format_candidate_package(doc, fingerprint)
+    region = _notes_region(doc)
+    batch_ids = [value for value in (heading_batch_id, role_batch_id) if value is not None]
+    if not batch_ids and levels is None and role_overrides is None and region_start_id is None:
+        return region, {}
+    if any(not isinstance(value, str) or not value for value in batch_ids) or len(set(batch_ids)) > 1:
+        raise SyncError("候选批次编号必须是非空文本，且标题与角色批次必须一致")
+    if any(value != package["batch_id"] for value in batch_ids):
+        raise SyncError("报告或候选标题已变化，请重新扫描；旧批次结果不能应用")
+    if region_start_id is not None and role_batch_id is None:
+        raise SyncError("应用附注边界必须同时提供角色批次编号")
+    if role_overrides is not None and role_batch_id is None:
+        raise SyncError("应用疑难角色必须同时提供角色批次编号")
+    if levels is not None and heading_batch_id is None:
+        raise SyncError("应用候选标题级别必须同时提供标题批次编号")
+
+    heading_items = {item["id"]: item for item in package["candidates"]}
+    role_items = {item["id"]: item for item in package["role_candidates"]}
+    boundary_items = {item["id"]: item for item in package["boundary_candidates"]}
+    overrides: dict[int, str] = {}
+    if levels is not None:
+        if not isinstance(levels, dict) or not levels or len(levels) > 300:
+            raise SyncError("候选标题级别必须是最多 300 项的非空映射")
+        for key, value in levels.items():
+            if key not in heading_items:
+                raise SyncError("候选标题编号不存在或不属于当前批次，已停止应用")
+            if type(value) is not int or not 1 <= value <= 4:
+                raise SyncError("候选标题级别必须是 1～4 的整数")
+            overrides[heading_items[key]["element_index"]] = f"heading_{value}"
+    if role_overrides is not None:
+        if not isinstance(role_overrides, dict) or not role_overrides or len(role_overrides) > 300:
+            raise SyncError("疑难角色必须是最多 300 项的非空映射")
+        for key, value in role_overrides.items():
+            if key not in role_items:
+                raise SyncError("疑难角色编号不存在或不属于当前批次，已停止应用")
+            if value not in role_items[key]["options"]:
+                raise SyncError("疑难角色只能选择候选提供的正文或表格标题")
+            element_index = role_items[key]["element_index"]
+            if element_index in overrides and overrides[element_index] != value:
+                raise SyncError("同一候选不能同时确认为不同角色")
+            overrides[element_index] = value
+    if region_start_id is not None:
+        if not isinstance(region_start_id, str) or region_start_id not in boundary_items:
+            raise SyncError("附注边界编号不存在或不属于当前批次，已停止应用")
+        region = (boundary_items[region_start_id]["element_index"], len(doc.element.body))
+    return region, overrides
 
 
 def _mode(values, *, ignore_none: bool = False):
@@ -537,6 +953,7 @@ def _default_formats() -> dict[str, ParagraphFormat]:
         "heading_4": ParagraphFormat("Times New Roman", "宋体", 10.5, False, "left", 18.0, "exact", 6.0, 0.0, 31.5, 0.0),
         "statement": ParagraphFormat("Times New Roman", "宋体", 10.5, False, "left", 18.0, "exact", 6.0, 0.0, 31.5, 0.0),
         "table_title": ParagraphFormat("Times New Roman", "宋体", 9.0, True, "center", 18.0, "exact", 6.0, 0.0, 0.0, 0.0),
+        "table_continuation": ParagraphFormat("Times New Roman", "宋体", 10.5, False, "right", 1.0, "auto", 0.0, 0.0, 0.0, 0.0),
         "body": body,
     }
 
@@ -563,10 +980,10 @@ def _merge_format(default: ParagraphFormat, samples: list[ParagraphFormat]) -> P
     )
 
 
-def _table_run_formats(doc) -> tuple[Counter, Counter]:
+def _table_run_formats(doc, tables: list[Table] | None = None) -> tuple[Counter, Counter]:
     fonts = Counter()
     sizes = Counter()
-    for table in doc.tables:
+    for table in doc.tables if tables is None else tables:
         for row in table.rows:
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
@@ -583,23 +1000,83 @@ def _table_run_formats(doc) -> tuple[Counter, Counter]:
     return fonts, sizes
 
 
-def build_profile(template: str | Path) -> FormatProfile:
+def _table_border_containers(table: Table) -> list:
+    containers = [table._tbl.tblPr]
+    style = table.style or table.part.styles.default(WD_STYLE_TYPE.TABLE)
+    seen = set()
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
+        tbl_pr = style.element.find(qn("w:tblPr"))
+        if tbl_pr is not None:
+            containers.append(tbl_pr)
+        style = style.base_style
+    return containers
+
+
+def _read_border(element) -> BorderFormat | None:
+    if element is None:
+        return None
+    val = element.get(qn("w:val")) or "single"
+    if val not in BORDER_VALUES:
+        return None
+    size = _number(element, "sz", 8.0)
+    if val in ("nil", "none"):
+        size = 0.0
+    elif size is None:
+        size = 0.5
+    color = element.get(qn("w:color"))
+    if color is not None and color.lower() != "auto" and not re.fullmatch(r"[0-9a-fA-F]{6}", color):
+        color = None
+    return BorderFormat(val, size, color)
+
+
+def _extract_table_borders(table: Table) -> dict[str, BorderFormat | None]:
+    containers = _table_border_containers(table)
+    result = {}
+    for edge in BORDER_EDGES:
+        result[edge] = None
+        for container in containers:
+            borders = container.find(qn("w:tblBorders"))
+            border = borders.find(qn(f"w:{edge}")) if borders is not None else None
+            value = _read_border(border)
+            if value is not None:
+                result[edge] = value
+                break
+    return result
+
+
+def _build_table_borders(doc, tables: list[Table] | None = None) -> dict[str, BorderFormat]:
+    samples: dict[str, list[BorderFormat]] = {edge: [] for edge in BORDER_EDGES}
+    for table in doc.tables if tables is None else tables:
+        for edge, value in _extract_table_borders(table).items():
+            if value is not None:
+                samples[edge].append(value)
+    return {edge: _mode(samples[edge]) or BorderFormat() for edge in BORDER_EDGES}
+
+
+def build_profile(template: str | Path, source: str | Path | None = None) -> FormatProfile:
     path = resolve_docx(str(template))
     doc = _open_document(path)
-    classified, _ = _classify_paragraphs(doc)
+    source_is_notes = source is not None and _notes_region(_open_document(resolve_docx(str(source)))) is not None
+    region = _notes_region(doc)
+    if source_is_notes and region is None:
+        raise SyncError("样板报告中未找到可识别的财务报表附注区，已停止套用")
+    classified, _ = _classify_paragraphs(doc, region=region if source_is_notes else None)
     grouped: dict[str, list[ParagraphFormat]] = defaultdict(list)
     for paragraph, role in classified:
         grouped[role].append(_effective_paragraph_format(paragraph))
     formats = _default_formats()
     for role, samples in grouped.items():
         formats[role] = _merge_format(formats.get(role, ParagraphFormat()), samples)
-    fonts, sizes = _table_run_formats(doc)
+    tables = _region_tables(doc, region) if source_is_notes else None
+    fonts, sizes = _table_run_formats(doc, tables)
     ascii_fonts = [name for name in fonts if name not in ("宋体", "SimSun", "微软雅黑")]
     return FormatProfile(
         paragraphs=formats,
         table_ascii_font=_mode(ascii_fonts) or "Times New Roman",
         table_east_asia_font=_mode([name for name in fonts if name in ("宋体", "SimSun")]) or "宋体",
         table_size=_mode([size for size in sizes if size <= 9.0]) or _mode(list(sizes)) or 9.0,
+        table_borders=_build_table_borders(doc, tables),
         template=str(path),
     )
 
@@ -632,6 +1109,61 @@ def _format_summary(fmt: ParagraphFormat) -> str:
     if fmt.left:
         parts.append(f"左缩进{fmt.left:g}磅")
     return "；".join(parts)
+
+
+def _table_border_summary(profile: FormatProfile) -> str:
+    if profile.table_borders is None:
+        return "旧方案未保存框线数据，保持原样"
+    groups: dict[BorderFormat, list[str]] = defaultdict(list)
+    for edge in BORDER_EDGES:
+        groups[profile.table_borders[edge]].append(BORDER_EDGE_LABELS[edge])
+    parts = []
+    for fmt, labels in groups.items():
+        if fmt.val in ("nil", "none"):
+            parts.append(f"{'、'.join(labels)}无框线")
+        else:
+            value = f"{'、'.join(labels)}：{BORDER_STYLE_LABELS[fmt.val]} {fmt.size:g}磅"
+            if fmt.color:
+                value += f" #{fmt.color}"
+            parts.append(value)
+    return "；".join(parts)
+
+
+def _apply_table_borders(table: Table, profile: FormatProfile) -> bool:
+    if profile.table_borders is None:
+        return False
+    tbl_pr = table._tbl.tblPr
+    previous = tbl_pr.find(qn("w:tblBorders"))
+    if previous is not None:
+        tbl_pr.remove(previous)
+    borders = OxmlElement("w:tblBorders")
+    for edge in BORDER_EDGES:
+        fmt = profile.table_borders[edge]
+        element = OxmlElement(f"w:{edge}")
+        element.set(qn("w:val"), fmt.val)
+        element.set(qn("w:space"), "0")
+        if fmt.val not in ("nil", "none"):
+            if fmt.size > 0:
+                element.set(qn("w:sz"), str(round(fmt.size * 8)))
+            if fmt.color:
+                element.set(qn("w:color"), fmt.color)
+        borders.append(element)
+    successors = {
+        qn("w:shd"), qn("w:tblLayout"), qn("w:tblCellMar"), qn("w:tblLook"),
+        qn("w:tblCaption"), qn("w:tblDescription"), qn("w:tblPrChange"),
+    }
+    for child in tbl_pr:
+        if child.tag in successors:
+            child.addprevious(borders)
+            break
+    else:
+        tbl_pr.append(borders)
+    for cell in table._tbl.xpath(".//w:tc"):
+        tc_pr = cell.find(qn("w:tcPr"))
+        cell_borders = tc_pr.find(qn("w:tcBorders")) if tc_pr is not None else None
+        if cell_borders is not None:
+            tc_pr.remove(cell_borders)
+    return True
 
 
 def _table_row_roles(table: Table) -> list[str]:
@@ -674,7 +1206,39 @@ def _set_run_font(run: Run, fmt: ParagraphFormat, *, size: float | None = None, 
         run.font.bold = target_bold
 
 
+def _clean_paragraph_format(paragraph: Paragraph) -> None:
+    ppr = paragraph._p.get_or_add_pPr()
+    spacing = ppr.find(qn("w:spacing"))
+    if spacing is not None:
+        for name in ("before", "after", "line", "lineRule", "beforeLines", "afterLines", "beforeAutospacing", "afterAutospacing"):
+            spacing.attrib.pop(qn(f"w:{name}"), None)
+        if not spacing.attrib:
+            ppr.remove(spacing)
+    indent = ppr.find(qn("w:ind"))
+    if indent is not None:
+        for name in ("left", "leftChars", "firstLine", "firstLineChars", "hanging", "hangingChars"):
+            indent.attrib.pop(qn(f"w:{name}"), None)
+        if not indent.attrib:
+            ppr.remove(indent)
+    alignment = ppr.find(qn("w:jc"))
+    if alignment is not None:
+        ppr.remove(alignment)
+    containers = [run._r.rPr for run in _paragraph_runs(paragraph)]
+    mark_rpr = ppr.find(qn("w:rPr"))
+    if mark_rpr is not None:
+        containers.append(mark_rpr)
+    for rpr in containers:
+        if rpr is None:
+            continue
+        for name in ("rFonts", "sz", "szCs", "b", "bCs"):
+            for element in rpr.findall(qn(f"w:{name}")):
+                rpr.remove(element)
+        if not len(rpr):
+            rpr.getparent().remove(rpr)
+
+
 def _apply_paragraph_format(paragraph: Paragraph, fmt: ParagraphFormat) -> None:
+    _clean_paragraph_format(paragraph)
     for run in _paragraph_runs(paragraph):
         _set_run_font(run, fmt)
     pf = paragraph.paragraph_format
@@ -682,10 +1246,14 @@ def _apply_paragraph_format(paragraph: Paragraph, fmt: ParagraphFormat) -> None:
         pf.alignment = ALIGN_VALUES[fmt.align]
     if fmt.line_value is not None:
         pf.line_spacing = fmt.line_value if fmt.line_rule == "auto" else Pt(fmt.line_value)
-    pf.space_before = Pt(fmt.before or 0.0)
-    pf.space_after = Pt(fmt.after or 0.0)
-    pf.first_line_indent = Pt(fmt.first_line or 0.0)
-    pf.left_indent = Pt(fmt.left or 0.0)
+    if fmt.before is not None:
+        pf.space_before = Pt(fmt.before)
+    if fmt.after is not None:
+        pf.space_after = Pt(fmt.after)
+    if fmt.first_line is not None:
+        pf.first_line_indent = Pt(fmt.first_line)
+    if fmt.left is not None:
+        pf.left_indent = Pt(fmt.left)
 
 
 def _looks_numeric(text: str) -> bool:
@@ -725,10 +1293,16 @@ def _apply_table_format(table: Table, profile: FormatProfile, scope: dict[str, b
     return formatted, Counter(roles)
 
 
-def _apply_profile(doc, profile: FormatProfile, scope: dict[str, bool]) -> dict[str, int]:
+def _apply_profile(
+    doc,
+    profile: FormatProfile,
+    scope: dict[str, bool],
+    paragraph_overrides: dict[int, str] | None = None,
+    region: tuple[int, int] | None = None,
+) -> dict[str, int]:
     counts: Counter[str] = Counter()
     selected_roles = _selected_paragraph_roles(scope)
-    classified, meta = _classify_paragraphs(doc)
+    classified, meta = _classify_paragraphs(doc, paragraph_overrides, region=region)
     skipped_paragraphs = 0
     protected_paragraphs = 0
     for paragraph, role in classified:
@@ -743,14 +1317,16 @@ def _apply_profile(doc, profile: FormatProfile, scope: dict[str, bool]) -> dict[
         counts[role] += 1
     table_paragraphs = 0
     skipped_tables = 0
-    table_enabled = scope["table_text"] or scope["table_emphasis"]
-    for table in doc.tables:
+    table_enabled = scope["table_text"] or scope["table_emphasis"] or scope["table_borders"]
+    for table in _region_tables(doc, region):
         if not table_enabled:
             skipped_tables += 1
             continue
         formatted, roles = _apply_table_format(table, profile, scope)
         table_paragraphs += formatted
         counts.update(roles)
+        if scope["table_borders"] and _apply_table_borders(table, profile):
+            counts["table_borders"] += 1
     counts["table_paragraphs"] = table_paragraphs
     counts["ambiguous"] = meta["ambiguous"]
     counts["empty"] = meta["empty"]
@@ -779,7 +1355,14 @@ def _document_snapshot(doc) -> dict:
     return {
         "text": tuple(body.xpath(".//w:t/text()")),
         "bookmarks": tuple(body.xpath(".//w:bookmarkStart/@w:name")),
+        "numbering": tuple(element.xml for element in body.xpath(".//w:numPr")),
+        "outlines": tuple(element.xml for element in body.xpath(".//w:outlineLvl")),
+        "fields": tuple(body.xpath(".//w:instrText/text()")) + tuple(body.xpath(".//w:fldSimple/@w:instr")),
         "tables": len(doc.tables),
+        "table_shapes": tuple(
+            (len(table.rows), tuple(len(row.cells) for row in table.rows), table._tbl.tblGrid.xml)
+            for table in doc.tables
+        ),
         "merges": tuple(merges),
         "sections": tuple(section_values),
         "links": tuple(links),
@@ -815,13 +1398,22 @@ def _format_source(source: Path, template: str | Path | None, profile_name: str 
     if template is None:
         return build_profile(source), str(source), True
     path = resolve_docx(str(template))
-    return build_profile(path), str(path), False
+    return build_profile(path, source), str(path), False
 
 
-def _scan_opened_report(source: Path, template_label: str, profile: FormatProfile, target, self_sample: bool = False, scope: dict[str, bool] | None = None) -> dict:
+def _scan_opened_report(
+    source: Path,
+    template_label: str,
+    profile: FormatProfile,
+    target,
+    self_sample: bool = False,
+    scope: dict | None = None,
+    paragraph_overrides: dict[int, str] | None = None,
+    region: tuple[int, int] | None = None,
+) -> dict:
     scope = _validated_scope(scope)
     selected_roles = _selected_paragraph_roles(scope)
-    classified, meta = _classify_paragraphs(target)
+    classified, meta = _classify_paragraphs(target, paragraph_overrides, region=region)
     counts = Counter(role for _, role in classified)
     protected_roles = Counter(role for paragraph, role in classified if (_outline_level(paragraph) or 0) > 4)
     protected = sum(protected_roles.values())
@@ -839,8 +1431,9 @@ def _scan_opened_report(source: Path, template_label: str, profile: FormatProfil
                 "selected": role in selected_roles and counts[role] > protected_roles[role],
                 "format": _format_summary(profile.paragraphs[role]),
             })
-    table_enabled = scope["table_text"] or scope["table_emphasis"]
-    table_rows = sum(len(table.rows) for table in target.tables) if table_enabled else 0
+    table_enabled = scope["table_text"] or scope["table_emphasis"] or scope["table_borders"]
+    tables = _region_tables(target, region)
+    table_rows = sum(len(table.rows) for table in tables) if table_enabled else 0
     warnings = []
     if meta["ambiguous"]:
         warnings.append(f"有 {meta['ambiguous']} 个大纲级别异常的段落保持原样，不会强行套用格式。")
@@ -855,17 +1448,18 @@ def _scan_opened_report(source: Path, template_label: str, profile: FormatProfil
         "scope": dict(scope),
         "totals": {
             "paragraphs": len(classified),
-            "tables": len(target.tables) if table_enabled else 0,
+            "tables": len(tables) if table_enabled else 0,
             "table_rows": table_rows,
             "empty_paragraphs": meta["empty"],
             "ambiguous_paragraphs": meta["ambiguous"],
             "selected_paragraphs": selected_paragraphs,
             "protected_paragraphs": protected,
             "skipped_paragraphs": len(classified) - selected_paragraphs - protected,
-            "skipped_tables": 0 if table_enabled else len(target.tables),
+            "skipped_tables": 0 if table_enabled else len(tables),
         },
         "roles": roles,
         "table_format": _format_summary(ParagraphFormat(profile.table_ascii_font, profile.table_east_asia_font, profile.table_size, None)),
+        "table_border_format": _table_border_summary(profile),
         "small_table_policy": "不大于样板表格字号的字号保留；较大字号统一为样板字号。",
         "warnings": warnings,
     }
@@ -877,12 +1471,32 @@ def scan_report_format(
     *,
     profile_name: str | None = None,
     scope: dict | None = None,
+    heading_batch_id: str | None = None,
+    heading_levels: dict | None = None,
+    role_batch_id: str | None = None,
+    role_overrides: dict | None = None,
+    region_start_id: str | None = None,
 ) -> dict:
     scope = _validated_scope(scope)
     source = resolve_docx(str(docx))
     profile, template_label, self_sample = _format_source(source, template, profile_name)
     target = _open_document(source)
-    return _scan_opened_report(source, template_label, profile, target, self_sample, scope)
+    fingerprint = hashlib.sha256(source.read_bytes()).hexdigest() if any(
+        value is not None
+        for value in (heading_batch_id, heading_levels, role_batch_id, role_overrides, region_start_id)
+    ) else ""
+    region, paragraph_overrides = _validated_format_overrides(
+        target, fingerprint, heading_batch_id, heading_levels,
+        role_batch_id, role_overrides, region_start_id,
+    )
+    if any(role.startswith("heading_") for role in paragraph_overrides.values()) and not scope["headings"]:
+        raise SyncError("应用候选标题级别时必须勾选“一至四级标题”")
+    if any(role in ("table_title", "table_continuation") for role in paragraph_overrides.values()) and not scope["statement"]:
+        raise SyncError("应用表格标题角色时必须勾选“报表名称、日期与表格标题”")
+    return _scan_opened_report(
+        source, template_label, profile, target, self_sample, scope,
+        paragraph_overrides, region,
+    )
 
 
 def run_report_format(
@@ -893,6 +1507,11 @@ def run_report_format(
     dry_run: bool = False,
     profile_name: str | None = None,
     scope: dict | None = None,
+    heading_batch_id: str | None = None,
+    heading_levels: dict | None = None,
+    role_batch_id: str | None = None,
+    role_overrides: dict | None = None,
+    region_start_id: str | None = None,
 ) -> dict:
     scope = _validated_scope(scope)
     source = resolve_docx(str(docx))
@@ -907,9 +1526,28 @@ def run_report_format(
         raise SyncError(f"输出文件已存在，未覆盖：{output_path}")
     profile, template_label, self_sample = _format_source(source, template, profile_name)
     target = _open_document(source)
-    result = _scan_opened_report(source, template_label, profile, target, self_sample, scope)
+    fingerprint = hashlib.sha256(source.read_bytes()).hexdigest() if any(
+        value is not None
+        for value in (heading_batch_id, heading_levels, role_batch_id, role_overrides, region_start_id)
+    ) else ""
+    region, paragraph_overrides = _validated_format_overrides(
+        target, fingerprint, heading_batch_id, heading_levels,
+        role_batch_id, role_overrides, region_start_id,
+    )
+    if any(role.startswith("heading_") for role in paragraph_overrides.values()) and not scope["headings"]:
+        raise SyncError("应用候选标题级别时必须勾选“一至四级标题”")
+    if any(role in ("table_title", "table_continuation") for role in paragraph_overrides.values()) and not scope["statement"]:
+        raise SyncError("应用表格标题角色时必须勾选“报表名称、日期与表格标题”")
+    result = _scan_opened_report(
+        source, template_label, profile, target, self_sample, scope,
+        paragraph_overrides, region,
+    )
+    result["assigned_headings"] = sum(role.startswith("heading_") for role in paragraph_overrides.values())
+    result["assigned_roles"] = sum(not role.startswith("heading_") for role in paragraph_overrides.values())
+    result["region_start"] = region[0] if region is not None else None
     result["output"] = str(output_path)
     result["dry_run"] = bool(dry_run)
+    result["visual_review"] = list(VISUAL_REVIEW)
     log(f"[格式] 格式来源：{template_label}")
     log(f"[格式] 待调整：{source.name}（处理 {result['totals']['selected_paragraphs']} 段、{result['totals']['tables']} 张表）")
     if dry_run:
@@ -917,7 +1555,7 @@ def run_report_format(
         return result
 
     before = _document_snapshot(target)
-    counts = _apply_profile(target, profile, scope)
+    counts = _apply_profile(target, profile, scope, paragraph_overrides, region)
     fd, temp_name = tempfile.mkstemp(prefix=f".{output_path.stem}.", suffix=output_path.suffix, dir=output_path.parent)
     os.close(fd)
     staged = Path(temp_name)

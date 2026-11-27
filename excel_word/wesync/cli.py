@@ -14,6 +14,7 @@ from .commands.blank_cmd import cmd_blank_tables
 from .commands.bookmark_cmd import cmd_bookmark
 from .commands.clear_cmd import cmd_clear_bookmarks
 from .commands.export_cmd import cmd_export, cmd_rejudge
+from .commands.incremental_cmd import cmd_incremental_export
 from .commands.marks_cmd import cmd_marks, cmd_marks_sync
 from .commands.placeholders_cmd import cmd_placeholders, cmd_placeholders_sync
 from .commands.writeback_cmd import cmd_writeback
@@ -60,6 +61,16 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--dry-run", action="store_true", help="只显示将导出的内容，不写文件")
     export_parser.add_argument("--force", action="store_true", help="跳过文件占用检查，强制尝试写入")
     export_parser.set_defaults(func=cmd_export)
+
+    incremental_parser = sub.add_parser("incremental-export", help="只登记 Word 中新增的表格、标注与占位符，不改既有工作簿行")
+    incremental_parser.add_argument("docx", help="Word 文件路径（.docx）")
+    incremental_parser.add_argument("--excel", help="现有工作簿路径，默认同目录 <主名>_表格数据.xlsx")
+    incremental_parser.add_argument("--no-excel-links", action="store_true", help="不在 Excel 中写 Word 定位链接")
+    incremental_parser.add_argument("--no-total-formulas", action="store_true", help="新增表格的合计行不写求和公式")
+    incremental_parser.add_argument("--no-backup", dest="backup", action="store_false", default=True, help="覆盖前不备份原文件到 _backup")
+    incremental_parser.add_argument("--dry-run", action="store_true", help="只显示将登记的内容，不写文件")
+    incremental_parser.add_argument("--force", action="store_true", help="跳过文件占用检查，强制尝试写入")
+    incremental_parser.set_defaults(func=cmd_incremental_export)
 
     rejudge_parser = sub.add_parser("rejudge", help="按工作簿当前内容重新判定 B 列表头/✓/✕（只改标记，不改数据）")
     rejudge_parser.add_argument("docx", help="Word 文件路径（.docx，用于定位默认工作簿）")

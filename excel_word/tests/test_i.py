@@ -48,18 +48,18 @@ def t31_placeholder_roundtrip():
     check("t31 建正文信息表", VALUES_SHEET in wb.sheetnames, str(wb.sheetnames))
     ws = wb[VALUES_SHEET]
     fields = [str(ws.cell(r, 1).value) for r in range(2, ws.max_row + 1)]
-    check("t31 字段齐全", set(fields) == {"审计期间", "报告编号", "资产总额", "单位名称"}, str(fields))
+    check("t31 字段齐全且排除表格", set(fields) == {"审计期间", "报告编号", "单位名称"}, str(fields))
     _fill_values(xlsx, {"审计期间": "2025年度", "报告编号": "XYZH/2026BJA1", "单位名称": "某某公司"})
     api.run_placeholder_export(docx)  # 再导出保留已填值
     wb = load_workbook(str(xlsx))
     ws = wb[VALUES_SHEET]
     kept = {str(ws.cell(r, 1).value): ws.cell(r, 2).value for r in range(2, ws.max_row + 1)}
-    check("t31 保留已填值", kept["审计期间"] == "2025年度" and kept["资产总额"] in (None, ""), str(kept))
+    check("t31 保留已填值", kept["审计期间"] == "2025年度" and "资产总额" not in kept, str(kept))
     before = docx.read_bytes()
     LOGS.clear()
     api.run_placeholder_sync(docx, dry_run=True)
     check("t31 预演不写盘", docx.read_bytes() == before)
-    check("t31 未填警告", any("未填值" in m and "资产总额" in m for m in LOGS), str(LOGS[-4:]))
+    check("t31 无表格字段未填警告", not any("未填值" in m and "资产总额" in m for m in LOGS), str(LOGS[-4:]))
     api.run_placeholder_sync(docx)
     doc = Document(str(docx))
     check("t31 跨run正文替换", "2025年度" in doc.paragraphs[0].text and "{审计" not in doc.paragraphs[0].text,
@@ -67,10 +67,8 @@ def t31_placeholder_roundtrip():
     check("t31 表格内替换", doc.tables[0].cell(1, 1).text == "{资产总额}", doc.tables[0].cell(1, 1).text)
     check("t31 页眉替换", "某某公司" in doc.sections[0].header.paragraphs[0].text,
           doc.sections[0].header.paragraphs[0].text)
-    # 补填后再同步
-    _fill_values(xlsx, {"资产总额": "5,654.00"})
-    api.run_placeholder_sync(docx)
-    check("t31 补填后替换", Document(str(docx)).tables[0].cell(1, 1).text == "5,654.00")
+    # 表格内占位符不参与同步，避免与表格回写冲突
+    check("t31 表格内保留", doc.tables[0].cell(1, 1).text == "{资产总额}", doc.tables[0].cell(1, 1).text)
 
 
 def t32_placeholder_zero_fields():
@@ -377,7 +375,7 @@ def t43_placeholder_values_display_format():
 
 def t44_display_accounting_and_locale_date():
     from datetime import datetime as dt_cls
-    acct = '_ * #,##0.00_ ;_ * \-#,##0.00_ ;_ * "-"??_ ;_ @_ '
+    acct = r'_ * #,##0.00_ ;_ * \-#,##0.00_ ;_ * "-"??_ ;_ @_ '
     cn_date = '[$-804]yyyy"年"m"月"d"日"'
     check("t44 会计正数", display_text(45805.36, acct) == "45,805.36", display_text(45805.36, acct))
     check("t44 会计负数", display_text(-45805.36, acct) == "-45,805.36", display_text(-45805.36, acct))

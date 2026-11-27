@@ -1,6 +1,6 @@
 [project]
 name = "audit-toolbox"
-version = "1.11.1"
+version = "1.11.3"
 description = "审计工具箱：Word 表格 ⇄ Excel 同步、标注同步、空白表格删除与恢复等"
 license = "MIT"
 requires-python = ">=3.12"

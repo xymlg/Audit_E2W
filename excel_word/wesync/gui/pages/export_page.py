@@ -23,6 +23,10 @@ class ExportPage(BasePage):
         card.layout().addWidget(self.backup)
 
         row = self.button_row(card, lambda: self._start(True), lambda: self._start(False), "仅预演", "开始导出")
+        incremental_btn = QPushButton("增量导出")
+        incremental_btn.setToolTip("只登记 Word 中新增的表格、标注与占位符；既有工作簿行和公式位置不变")
+        incremental_btn.clicked.connect(lambda _checked=False: self._incremental())
+        row.layout().insertWidget(row.layout().count() - 1, incremental_btn)
         rejudge_btn = QPushButton("重新判定✓/✕")
         rejudge_btn.setToolTip("在 Excel 改过内容后，按当前内容重判 B 列表头/✓/✕（只改标记，不改数据；「已删」行保持原样）")
         rejudge_btn.clicked.connect(lambda _checked=False: self._rejudge())
@@ -30,6 +34,30 @@ class ExportPage(BasePage):
         btn = QPushButton("清理 Word 书签")
         btn.clicked.connect(lambda _checked=False: self._clear_bookmarks())
         row.layout().insertWidget(row.layout().count() - 1, btn)
+
+    def _incremental(self) -> None:
+        if not self.ctx.require_docx():
+            return
+        excel = self.ctx.workbook_path()
+        if not excel.exists():
+            self.ctx.error("未找到工作簿", f"未找到工作簿：\n{excel}\n\n请先执行一次全量「开始导出」。")
+            return
+        if not self.ctx.confirm(
+            "确认增量导出",
+            f"只登记 Word 中尚未锚定的新增表格、标注与占位符：\n\nWord：{self.ctx.docx}\nExcel：{excel}\n\n"
+            "既有工作簿行、编号与公式位置不会改动；新表格按发现顺序写入「新增表格」（XT01、XT02…）。\n"
+            "写盘前会自动备份，确认开始？",
+        ):
+            self.ctx.log("已取消增量导出。", "muted")
+            return
+        self.ctx.run_steps(
+            [("增量导出", lambda: api.run_incremental_export(
+                self.ctx.docx, self.ctx.excel,
+                with_excel_links=self.links.isChecked(),
+                totals_formula=self.totals.isChecked(),
+                backup=self.backup.isChecked(),
+            ))]
+        )
 
     def _rejudge(self) -> None:
         if not self.ctx.require_docx():

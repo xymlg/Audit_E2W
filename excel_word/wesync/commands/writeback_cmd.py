@@ -13,16 +13,12 @@ from docx.oxml.ns import qn
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font
 
-from ..config import DELETED_BOOKMARK, EXCEL_LINK_TEXT, FILL_CODE_COLUMN, FONT_NAME, FONT_SIZE, MARK_DELETED, MARK_NO, NEW_BOOKMARK, SHEET_NAME
+from ..config import DELETED_BOOKMARK, EXCEL_LINK_TEXT, FILL_CODE_COLUMN, FONT_NAME, FONT_SIZE, MARK_DELETED, MARK_NO, NEW_BOOKMARK, SHEET_NAME, SHEET_NEW_TABLES
 from ..console import flush_log_summary, log, log_change, warn
 from ..align import align_blocks_to_tables
 from ..changelog import export_changelog
 from ..docx_bookmarks import (
-    bookmark_names,
     cleanup_excel_markers,
-    insert_table_bookmark,
-    new_cpah_name,
-    next_bookmark_id,
     table_index_map_by_bookmark,
     unclaimed_table_indices,
 )
@@ -30,13 +26,12 @@ from ..docx_columns import sync_columns
 from ..docx_edit import set_cell_text
 from ..docx_grid import body_items, build_cellmap, para_first_run_rpr, text_grid
 from ..docx_meta import collect_table_info, dedupe_table_names
-from ..docx_newtable import available_width_dxa, build_table, col_widths_from_excel, insert_new_table
 from ..docx_rows import align_rows
 from ..errors import SyncError
 from ..excel_blocks import block_merges, parse_blocks, refresh_anchor_metadata, refresh_defined_names
 from ..fsops import check_file_free, load_workbook_for_save, resolve_docx, resolve_xlsx, save_docx_xlsx_transaction
 from ..sort_rules import apply_block_sort
-from ..valuefmt import display_text, evaluate_formula, formula_map
+from ..valuefmt import display_cell, evaluate_formula, formula_map
 
 
 def _block_label(block: dict, limit: int = 30) -> str:
@@ -59,7 +54,7 @@ def _new_table_grid(ws, block: dict, cached) -> list[list[str]]:
             cell = ws.cell(xlsx_row, col0 + c)
             raw = cell.value
             if isinstance(raw, str) and raw.startswith("="):
-                value = cached.get((xlsx_row, col0 + c))
+                value = cached.get((ws.title, xlsx_row, col0 + c))
                 if value is None:
                     value = evaluate_formula(ws, xlsx_row, col0 + c, cached)
                 if value is None:
@@ -68,70 +63,9 @@ def _new_table_grid(ws, block: dict, cached) -> list[list[str]]:
                         f"（支持 SUM 与简单四则运算）。请先在 Excel 中打开并保存该文件后再回写"
                     )
                 raw = value
-            row_texts.append(display_text(raw, cell.number_format))
+            row_texts.append(display_cell(cell, raw))
         grid.append(row_texts)
     return grid
-
-
-def _prev_anchor_tbl(order, code, recorded, table_index, doc, created):
-    """新表插入点：工作簿中它之前最近的、能定位到 Word 表格的块。"""
-    for prior in reversed(order[: order.index(code)]):
-        if prior in created:
-            return created[prior], prior
-        bookmark = recorded.get(prior, "")
-        if not bookmark or bookmark in (NEW_BOOKMARK, DELETED_BOOKMARK):
-            continue
-        index = table_index.get(bookmark)
-        if index is not None:
-            return doc.tables[index]._tbl, prior
-    return None, "文档末尾"
-
-
-def _new_block_anchor(order, code, block, recorded, table_index, doc, created):
-    """新表插入点：优先用表块记录的指定位置（F 列「位置：T0x之后」），否则按工作簿顺序。"""
-    after = (block.get("meta", {}).get("after") or "").strip()
-    if after and after != "末尾":
-        if after in created:
-            return created[after], after
-        bookmark = recorded.get(after, "")
-        if bookmark and bookmark not in (NEW_BOOKMARK, DELETED_BOOKMARK):
-            index = table_index.get(bookmark)
-            if index is not None:
-                return doc.tables[index]._tbl, after
-        log(f"[提醒] {code} 指定的插入位置 {after} 在 Word 中找不到对应表格，改按工作簿顺序插入")
-    return _prev_anchor_tbl(order, code, recorded, table_index, doc, created)
-
-
-def _create_new_tables(doc, ws, order, blocks, recorded, table_index, cached) -> int:
-    """按「书签：新增」标记在 Word 里建表并登记书签，返回创建数。"""
-    new_codes = [code for code in order if recorded.get(code) == NEW_BOOKMARK]
-    if not new_codes:
-        return 0
-    existing_names = bookmark_names(doc.element.body)
-    bookmark_id = next_bookmark_id(doc)
-    total_dxa = available_width_dxa(doc)
-    created: dict[str, object] = {}
-    for code in new_codes:
-        block = blocks[code]
-        if not block["grid_rows"]:
-            raise SyncError(f"{code}：新表块没有网格行，请在 Excel 里填好表格内容后再同步")
-        grid = _new_table_grid(ws, block, cached)
-        merges = block_merges(ws, block)
-        widths = col_widths_from_excel(ws, block["ncols"], total_dxa, block.get("col0", 2))
-        tbl = build_table(grid, merges, block["ncols"], widths)
-        prev_tbl, prev_label = _new_block_anchor(order, code, block, recorded, table_index, doc, created)
-        name = _block_label(block, limit=60) or "新表"
-        insert_new_table(doc, prev_tbl, tbl, name)
-        bookmark = new_cpah_name(existing_names)
-        insert_table_bookmark(tbl, bookmark, bookmark_id)
-        bookmark_id += 1
-        recorded[code] = bookmark
-        created[code] = tbl
-        log(
-            f"[新增] {code} {name}：已在 {prev_label} 之后创建"
-            f"（{len(grid)}行×{block['ncols']}列，合并区 {len(merges)} 处，书签 {bookmark}）"
-        )
-    return len(created)
 
 
 def _sync_table(code: str, block: dict, tbl, ws, cached, recorder=None, name: str = "") -> dict:
@@ -194,7 +128,7 @@ def _sync_table(code: str, block: dict, tbl, ws, cached, recorder=None, name: st
                 continue
             raw = cell.value
             if isinstance(raw, str) and raw.startswith("="):
-                cached_value = cached.get((xlsx_row, col0 + excel_col))
+                cached_value = cached.get((ws.title, xlsx_row, col0 + excel_col))
                 if cached_value is None:
                     cached_value = evaluate_formula(ws, xlsx_row, col0 + excel_col, cached)
                 if cached_value is None:
@@ -203,7 +137,7 @@ def _sync_table(code: str, block: dict, tbl, ws, cached, recorder=None, name: st
                         f"（支持 SUM 与简单四则运算）。请先在 Excel 中打开并保存该文件后再回写"
                     )
                 raw = cached_value
-            text = display_text(raw, cell.number_format)
+            text = display_cell(cell, raw)
             if pos is None or not pos.owner:
                 if text.strip():
                     warn(
@@ -250,6 +184,19 @@ def cmd_writeback(args) -> int:
     recorder: list[dict] = []
 
     order, blocks = parse_blocks(ws)
+    base_codes = set(order)
+    for sheet_name in (SHEET_NEW_TABLES,):
+        if sheet_name not in wb.sheetnames:
+            continue
+        extra_order, extra_blocks = parse_blocks(wb[sheet_name])
+        duplicate = set(extra_order) & set(order)
+        if duplicate:
+            raise SyncError(f"工作簿中表编号重复：{'、'.join(sorted(duplicate))}。")
+        order.extend(extra_order)
+        blocks.update(extra_blocks)
+    for code, block in blocks.items():
+        block["sheet_name"] = SHEET_NAME if code in base_codes else SHEET_NEW_TABLES
+        block["_ws"] = wb[block["sheet_name"]]
     if not order:
         raise SyncError("工作簿里没有识别到任何表块，请确认该文件由本工具导出")
 
@@ -264,7 +211,8 @@ def cmd_writeback(args) -> int:
     for code in order:
         if not recorded.get(code) or recorded[code] in (NEW_BOOKMARK, DELETED_BOOKMARK):
             continue
-        stats = apply_block_sort(ws, blocks[code], cached, dry_run=args.dry_run)
+        block_ws = blocks[code]["_ws"]
+        stats = apply_block_sort(block_ws, blocks[code], cached, dry_run=args.dry_run)
         if stats and not args.dry_run:
             sort_changed += 1
 
@@ -272,25 +220,9 @@ def cmd_writeback(args) -> int:
     if delete_cross and all(blocks[c].get("col0", 2) == 2 for c in order):
         log("[提示] 该工作簿为旧布局（无 B 列标记），「删除✕行」本次不生效；重新导出后即可使用。")
 
-    new_codes = [code for code in order if recorded.get(code) == NEW_BOOKMARK]
-    created_count = 0
-    if new_codes:
-        real_names = {n for n in recorded.values() if n and n not in (NEW_BOOKMARK, DELETED_BOOKMARK)}
-        pre_index = table_index_map_by_bookmark(doc, real_names, include_anchors=True)
-        if args.dry_run:
-            for code in new_codes:
-                block = blocks[code]
-                _, prev_label = _new_block_anchor(order, code, block, recorded, pre_index, doc, {})
-                log(
-                    f"[新增·预演] {code} {_block_label(block)}：将在 {prev_label} 之后创建"
-                    f"（{len(block['grid_rows'])}行×{block['ncols']}列）"
-                )
-        else:
-            created_count = _create_new_tables(doc, ws, order, blocks, recorded, pre_index, cached)
-            for code in new_codes:
-                recorder.append({"code": code, "name": _block_label(blocks[code]), "kind": "新表",
-                                 "item": f"新建 {len(blocks[code]['grid_rows'])}行×{blocks[code]['ncols']}列",
-                                 "old": "", "new": ""})
+    for code in order:
+        if recorded.get(code) == NEW_BOOKMARK:
+            warn(f"{code}：旧版「书签：新增」表块已停用，请在 Word 中插入表格后重新执行「增量导出」。")
 
     items = body_items(doc)
     infos = [collect_table_info(doc, items, idx, tab) for idx, tab in enumerate(doc.tables)]
@@ -327,7 +259,7 @@ def cmd_writeback(args) -> int:
         log(f"[清理] 已删除 Word 正文中遗留的 {marker_removed} 处 {EXCEL_LINK_TEXT} 文字/断链")
 
     log(f"读取 Word：{docx_path.name}（{len(doc.tables)} 张表）")
-    log(f"读取 Excel：{xlsx_path.name}（工作表：{SHEET_NAME}，{len(order)} 个表块）")
+    log(f"读取 Excel：{xlsx_path.name}（工作表：{SHEET_NAME}" + (f"＋{SHEET_NEW_TABLES}" if SHEET_NEW_TABLES in wb.sheetnames else "") + f"，{len(order)} 个表块）")
     if args.dry_run:
         log("预演模式（--dry-run）：只显示将发生的改动，不写入文件。")
 
@@ -343,10 +275,13 @@ def cmd_writeback(args) -> int:
 
     for code in order:
         block = blocks[code]
+        block_ws = block["_ws"]
         bookmark = recorded[code]
         label = _block_label(block)
         if bookmark == NEW_BOOKMARK:
-            continue  # 新增块的预演已在前面单独列出
+            skipped_codes.append(code)
+            log(f"[跳过] {code} {label}：旧版「书签：新增」表块已停用，请改用「增量导出」")
+            continue
         if bookmark == DELETED_BOOKMARK:
             skipped_codes.append(code)
             log(f"[跳过] {code} {label}：已可逆删除（Excel 保留表块，可在「删除空白表格」页恢复）")
@@ -377,15 +312,15 @@ def cmd_writeback(args) -> int:
             if delete_cross and block.get("col0", 2) == 3:
                 cross_rows = [
                     r for r in block["grid_rows"][1:]
-                    if str(ws.cell(r, 2).value or "").strip() == MARK_NO
-                    and not display_text(ws.cell(r, 3).value, ws.cell(r, 3).number_format).strip().startswith("合计")
+                    if str(block_ws.cell(r, 2).value or "").strip() == MARK_NO
+                    and not display_cell(block_ws.cell(r, 3)).strip().startswith("合计")
                 ]
                 if cross_rows:
                     sync_block = {**block, "grid_rows": [r for r in block["grid_rows"] if r not in cross_rows]}
                     remaining_body = [
                         r for r in block["grid_rows"][1:]
                         if r not in cross_rows
-                        and not display_text(ws.cell(r, 3).value, ws.cell(r, 3).number_format).strip().startswith("合计")
+                        and not display_cell(block_ws.cell(r, 3)).strip().startswith("合计")
                     ]
                     if not remaining_body:
                         warn(
@@ -393,7 +328,7 @@ def cmd_writeback(args) -> int:
                             f"之后改回✓恢复时因无数据行可复制格式会跳过该表，需先在 Word 手工补一行或从备份回滚。"
                         )
                     items_text = "、".join(
-                        (display_text(ws.cell(r, 3).value, ws.cell(r, 3).number_format).strip() or "（空行）")
+                        (display_cell(block_ws.cell(r, 3)).strip() or "（空行）")
                         for r in cross_rows
                     )
                     log(
@@ -402,7 +337,7 @@ def cmd_writeback(args) -> int:
                     )
                     recorder.append({"code": code, "name": label, "kind": "删行(✕)",
                                      "item": f"删除 {len(cross_rows)} 个✕行：" + items_text, "old": "", "new": ""})
-            stats = _sync_table(code, sync_block, tbl, ws, cached, recorder=recorder, name=label)
+            stats = _sync_table(code, sync_block, tbl, block_ws, cached, recorder=recorder, name=label)
         except SyncError as exc:
             tbl.getparent().replace(tbl, tbl_snapshot)
             del recorder[recorder_len:]
@@ -412,7 +347,7 @@ def cmd_writeback(args) -> int:
             continue
         if cross_rows and not args.dry_run:
             for r in cross_rows:
-                cell = ws.cell(r, 2)
+                cell = block_ws.cell(r, 2)
                 cell.value = MARK_DELETED
                 cell.font = Font(name=FONT_NAME, size=FONT_SIZE, color="808080")
                 cell.fill = FILL_CODE_COLUMN
@@ -431,7 +366,7 @@ def cmd_writeback(args) -> int:
     if unclaimed:
         log(f"[提示] Word 中有 {len(unclaimed)} 张表格未在工作簿中找到对应记录，已保持原样")
 
-    if not synced_codes and not created_count and not new_codes:
+    if not synced_codes:
         flush_log_summary()
         log(f"没有任何表块匹配到 Word 表格，未做任何写入（共 {len(order)} 个表块，全部跳过）。")
         return 0
@@ -445,16 +380,17 @@ def cmd_writeback(args) -> int:
         # 元数据里的书签名必须沿用工作簿里记录的那个（配对依据），不能被占位名覆盖
         info = {**infos[index], "bookmark": recorded[code]}
         row = block["anchor_row"]
-        before = [ws.cell(row, col).value for col in range(1, 6)]
+        block_ws = block["_ws"]
+        before = [block_ws.cell(row, col).value for col in range(1, 6)]
         refresh_anchor_metadata(
-            ws,
+            block_ws,
             block,
             info,
             docx_path.name,
-            with_link=block.get("meta", {}).get("link_col") is not None or code in new_codes,
+            with_link=block.get("meta", {}).get("link_col") is not None,
             ncols=block["ncols"],
         )
-        after = [ws.cell(row, col).value for col in range(1, 6)]
+        after = [block_ws.cell(row, col).value for col in range(1, 6)]
         if before != after:
             meta_changed += 1
 
@@ -470,19 +406,18 @@ def cmd_writeback(args) -> int:
     if other_skips:
         reasons.append(f"已删除/缺少书签 {other_skips} 张")
     skip_note = f"，跳过 {len(skipped_codes)} 张表（{'、'.join(reasons)}）" if skipped_codes else ""
-    new_note = f"，新增 {created_count} 张表" if created_count else ""
     sort_note = f"，排序 {sort_changed} 张表" if sort_changed else ""
     cross_note = f"，删除✕行 {total_cross} 行" if total_cross else ""
     log(
         f"合计：同步 {len(synced_codes)} 张表（改动 {total_cells} 个单元格，"
-        f"{total_rows} 行结构，{total_columns} 列结构）{new_note}{sort_note}{cross_note}{skip_note}。"
+        f"{total_rows} 行结构，{total_columns} 列结构）{sort_note}{cross_note}{skip_note}。"
     )
 
     if args.dry_run:
         log("预演结束，未写入任何文件。")
         return 0
 
-    docx_changed = bool(total_cells or total_rows or total_columns or marker_removed or created_count)
+    docx_changed = bool(total_cells or total_rows or total_columns or marker_removed)
     xlsx_changed = bool(meta_changed or name_changes or sort_changed or mark_changed)
     if not docx_changed and not xlsx_changed:
         log("Word 与 Excel 数据一致，未做任何写入。")

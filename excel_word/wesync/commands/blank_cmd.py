@@ -10,13 +10,13 @@ from copy import copy
 
 import docx
 
-from ..config import DELETED_BOOKMARK, NEW_BOOKMARK, SHEET_NAME
+from ..config import DELETED_BOOKMARK, NEW_BOOKMARK, SHEET_NAME, SHEET_NEW_TABLES
 from ..console import log
 from ..docx_blank import delete_blank_tables, find_blank_tables
 from ..docx_bookmarks import table_index_map_by_bookmark
 from ..errors import SyncError
 from ..excel_blocks import parse_blocks
-from ..fsops import backup_file, check_file_free, load_workbook_for_save, resolve_docx, resolve_xlsx
+from ..fsops import backup_file, check_file_free, load_workbook_for_save, resolve_docx, resolve_xlsx, save_docx_xlsx_transaction
 
 
 def _parse_pick(text: str, count: int) -> list[int]:
@@ -35,6 +35,20 @@ def _parse_pick(text: str, count: int) -> list[int]:
     return nos
 
 
+def _load_all_blocks(wb):
+    order, blocks = parse_blocks(wb[SHEET_NAME])
+    base_codes = set(order)
+    for sheet_name in (SHEET_NEW_TABLES,):
+        if sheet_name in wb.sheetnames:
+            extra_order, extra_blocks = parse_blocks(wb[sheet_name])
+            order.extend(extra_order)
+            blocks.update(extra_blocks)
+    for code, block in blocks.items():
+        block["sheet_name"] = SHEET_NAME if code in base_codes else SHEET_NEW_TABLES
+        block["_ws"] = wb[block["sheet_name"]]
+    return order, blocks
+
+
 def _plan_reversible(doc, xlsx_path, selected, force=False):
     """可逆删除前的准备：找到每个候选对应的工作簿表块与原位置锚点。"""
     if not xlsx_path.exists():
@@ -43,8 +57,7 @@ def _plan_reversible(doc, xlsx_path, selected, force=False):
     wb = load_workbook_for_save(xlsx_path)
     if SHEET_NAME not in wb.sheetnames:
         raise SyncError(f"工作簿中找不到工作表“{SHEET_NAME}”，请先重新执行「导出表格到 Excel」。")
-    ws = wb[SHEET_NAME]
-    _, blocks = parse_blocks(ws)
+    _, blocks = _load_all_blocks(wb)
     name_to_code = {
         block["bookmark"]: code
         for code, block in blocks.items()
@@ -66,14 +79,16 @@ def _plan_reversible(doc, xlsx_path, selected, force=False):
                 prev_name = index_to_name[i]
                 break
         plans.append((cand, with_caption, code, prev_name))
-    return wb, ws, blocks, plans
+    return wb, blocks, plans
 
 
-def _mark_deleted_blocks(wb, ws, blocks, plans, xlsx_path) -> None:
+def _mark_deleted_blocks(blocks, plans) -> None:
     """Word 删表后，把工作簿对应表块标记为「已删除」并记录原位置与原标题。"""
     for cand, with_caption, code, prev_name in plans:
-        row = blocks[code]["anchor_row"]
-        col0 = blocks[code].get("col0", 2)
+        block = blocks[code]
+        ws = block["_ws"]
+        row = block["anchor_row"]
+        col0 = block.get("col0", 2)
         ws.cell(row, col0 + 1, f"书签：{DELETED_BOOKMARK}")
         link = ws.cell(row, col0 + 2)
         link.value = None
@@ -84,12 +99,6 @@ def _mark_deleted_blocks(wb, ws, blocks, plans, xlsx_path) -> None:
         anchor_style = ws.cell(row, col0 + 1)._style
         for col in (col0 + 4, col0 + 5):
             ws.cell(row, col)._style = copy(anchor_style)
-    backup = backup_file(xlsx_path)
-    wb.save(str(xlsx_path))
-    log(
-        f"[可逆] 工作簿已标记 {len(plans)} 个表块为「已删除」（内容保留，可随时恢复）"
-        + (f"（原工作簿已备份：{backup.name}）" if backup else "")
-    )
 
 
 def cmd_blank_tables(args) -> int:
@@ -138,17 +147,30 @@ def cmd_blank_tables(args) -> int:
     xlsx_path = resolve_xlsx(docx_path, getattr(args, "excel", None))
     prepared = _plan_reversible(doc, xlsx_path, selected, args.force) if reversible else None
     result = delete_blank_tables(doc, selected)
-    backup = backup_file(docx_path)
-    doc.save(str(docx_path))
+    if reversible:
+        wb, blocks, plans = prepared
+        _mark_deleted_blocks(blocks, plans)
+        backups = save_docx_xlsx_transaction(
+            docx_path=docx_path, doc=doc, xlsx_path=xlsx_path, wb=wb,
+            backup=getattr(args, "backup", True),
+        )
+        docx_backup = backups.get(docx_path)
+        xlsx_backup = backups.get(xlsx_path)
+    else:
+        docx_backup = backup_file(docx_path)
+        doc.save(str(docx_path))
+        xlsx_backup = None
     log(
         f"[空白表] 已删除 {result['tables']} 张空白表、{result['captions']} 个表标题"
-        + (f"（原文件已备份：{backup.name}）" if backup else "")
+        + (f"（原文件已备份：{docx_backup.name}）" if docx_backup else "")
     )
     if result["bookmarks"]:
         log(f"[空白表] 顺带清理失去配对的定位书签端点 {result['bookmarks']} 个")
     if reversible:
-        wb, ws, blocks, plans = prepared
-        _mark_deleted_blocks(wb, ws, blocks, plans, xlsx_path)
+        log(
+            f"[可逆] 工作簿已标记 {len(plans)} 个表块为「已删除」（内容保留，可随时恢复）"
+            + (f"（原工作簿已备份：{xlsx_backup.name}）" if xlsx_backup else "")
+        )
         log("[可逆] Excel 表块已保留；要恢复时在「删除空白表格」页勾选恢复，或命令行 --restore 编号。")
     else:
         log("[空白表] 表格有删减，请重新执行「1-导出表格到Excel」重建工作簿，再做同步。")
@@ -173,8 +195,7 @@ def cmd_restore_tables(args) -> int:
     wb = load_workbook_for_save(xlsx_path)
     if SHEET_NAME not in wb.sheetnames:
         raise SyncError(f"工作簿中找不到工作表“{SHEET_NAME}”，请确认该文件由本工具导出")
-    ws = wb[SHEET_NAME]
-    order, blocks = parse_blocks(ws)
+    order, blocks = _load_all_blocks(wb)
     deleted = [code for code in order if blocks[code].get("bookmark") == DELETED_BOOKMARK]
     log(f"读取 Word：{docx_path.name}")
     if not deleted:
@@ -214,9 +235,9 @@ def cmd_restore_tables(args) -> int:
         if not block["grid_rows"]:
             raise SyncError(f"{code}：表块没有网格行，无法恢复")
         meta = block.get("meta", {})
-        grid = _new_table_grid(ws, block, cached)
-        merges = block_merges(ws, block)
-        widths = col_widths_from_excel(ws, block["ncols"], total_dxa)
+        grid = _new_table_grid(block["_ws"], block, cached)
+        merges = block_merges(block["_ws"], block)
+        widths = col_widths_from_excel(block["_ws"], block["ncols"], total_dxa, col0=block.get("col0", 2))
         tbl = build_table(grid, merges, block["ncols"], widths)
         anchor = meta.get("restore_after") or ""
         prev_tbl = None
@@ -238,13 +259,18 @@ def cmd_restore_tables(args) -> int:
     for code, (bookmark, tbl) in restored.items():
         index = next(i for i, tab in enumerate(doc.tables) if tab._tbl is tbl)
         info = {**infos[index], "bookmark": bookmark}
-        refresh_anchor_metadata(ws, blocks[code], info, docx_path.name, with_link=True, ncols=blocks[code]["ncols"])
+        refresh_anchor_metadata(
+            blocks[code]["_ws"], blocks[code], info, docx_path.name,
+            with_link=True, ncols=blocks[code]["ncols"]
+        )
     refresh_defined_names(wb, {code: blocks[code] for code in restored})
 
-    docx_backup = backup_file(docx_path)
-    doc.save(str(docx_path))
+    backups = save_docx_xlsx_transaction(
+        docx_path=docx_path, doc=doc, xlsx_path=xlsx_path, wb=wb,
+        backup=getattr(args, "backup", True),
+    )
+    docx_backup = backups.get(docx_path)
+    xlsx_backup = backups.get(xlsx_path)
     log(f"[恢复] 已保存 {docx_path.name}" + (f"（原文件已备份：{docx_backup.name}）" if docx_backup else ""))
-    xlsx_backup = backup_file(xlsx_path)
-    wb.save(str(xlsx_path))
     log(f"[恢复] 已保存 {xlsx_path.name}（表块标记已改回真实书签）" + (f"（原工作簿已备份：{xlsx_backup.name}）" if xlsx_backup else ""))
     return 0

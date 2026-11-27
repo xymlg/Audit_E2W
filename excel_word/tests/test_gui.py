@@ -278,6 +278,26 @@ def test_g10_batch_contents(win, qapp):
     check("仅占位符已同步", any("丙公司" in p.text for p in Document(str(docx)).paragraphs))
     check("表格未动", word_tables(docx)[0][1][1] == "1", str(word_tables(docx)))
 
+def test_g16_incremental_export_button(win, qapp):
+    from PySide6.QtWidgets import QPushButton
+    from wesync.config import SHEET_NEW_TABLES
+
+    d = ws_dir("g16")
+    docx = make_doc(d / "增量.docx", [("表1", [["项目", "金额"], ["A", "1"]])])
+    api.run_export(docx)
+    doc = Document(str(docx))
+    doc.add_table(rows=2, cols=2).cell(0, 0).text = "新增项目"
+    doc.save(str(docx))
+    win.set_docx(docx)
+    page = win._pages["ExportPage"]
+    button = next(button for button in page.findChildren(QPushButton) if button.text() == "增量导出")
+    check("增量导出按钮存在", button.isEnabled())
+    button.click()
+    check("GUI增量任务完成", wait_idle(qapp, win))
+    wb = load_workbook(str(api.workbook_path(docx)))
+    check("GUI增量表已登记", SHEET_NEW_TABLES in wb.sheetnames and wb[SHEET_NEW_TABLES].max_row > 1, str(wb.sheetnames))
+
+
 def test_g11_runner_tolerates_dict_result(win, qapp):
     errors = []
     old_error = win.ctx.error
@@ -450,11 +470,14 @@ def test_g15_format_scope_tab_invalidates_preview_and_limits_apply(win, qapp, mo
         button.setChecked(True)
     check("格式页恰有两个Tab", page.tabs.count() == 2, str(page.tabs.count()))
     check("第二个Tab为调整项目", page.tabs.tabText(1) == "调整项目", page.tabs.tabText(1))
-    check("六项默认全部勾选", set(page.scope_buttons) == set(DEFAULT_SCOPE)
+    check("七项默认全部勾选", set(page.scope_buttons) == set(DEFAULT_SCOPE)
           and all(button.isChecked() for button in page.scope_buttons.values()), str(page._scope()))
+    check("表格框线可单独选择", "table_borders" in page.scope_buttons)
 
+    win._select_page("FormatPage")
     win.set_docx(target)
-    page.on_show()
+    check("顶部选文件后当前格式页立即刷新", page.target_label.text() == str(target), page.target_label.text())
+    check("顶部选文件后自动带出副本路径", page.output_edit.text() == str(target.with_name("乱版_格式调整.docx")), page.output_edit.text())
     page.template_edit.setText(str(template))
     page._start_scan()
     check("默认范围预演完成", wait_idle(qapp, win))
@@ -480,6 +503,8 @@ def test_g15_format_scope_tab_invalidates_preview_and_limits_apply(win, qapp, mo
     formatted_body = next(p for p in formatted.paragraphs if "未选择时保持原样" in p.text)
     check("取消正文后正文保持原样", formatted_body.runs[0].font.size == Pt(30))
     check("仍调整所选表格", formatted.tables[0].cell(1, 1).paragraphs[0].runs[0].font.size == Pt(8))
+    check("生成后显示 Word 目视验收清单", "Word 目视验收" in page.details.toPlainText()
+          and "宽表格" in page.details.toPlainText(), page.details.toPlainText())
 
     page.scope_buttons["body"].setChecked(True)
     check("恢复正文后需重新预演", not page.apply_button.isEnabled())

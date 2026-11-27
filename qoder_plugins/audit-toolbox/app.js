@@ -31,12 +31,7 @@
     bookmark: { group: "维护", title: "重建 / 迁移书签", description: "把 Word 表格重新锚定为整表书签，并清理正文遗留的〔→Excel〕文字，不改 Excel 数据。", requires: ["docx"], dryRun: true, action: "重建书签", fields: [{ key: "withExcelLinks", type: "checkbox", label: "沿用已有 Excel 定位链接", default: true }] },
     "clear-bookmarks": { group: "维护", title: "清理 Word 书签", description: "清除工具写入的定位书签。执行后需重新导出 Excel 才能继续正常同步。", requires: ["docx"], dryRun: true, action: "清理书签", danger: true },
     "table-list": { group: "维护", title: "查看工作簿表块", description: "只读查看表块编号、表名、书签和行列数，也可从这里选择新表插入位置。", query: true, requires: ["docx", "excel"], action: "查看表块" },
-    "append-table": { group: "维护", title: "追加新表块", description: "在指定表后或最后一张表后增加新表块。随后在 Excel 填好内容，再同步到 Word。", requires: ["docx", "excel"], action: "插入新表块", fields: [
-      { key: "name", type: "text", label: "新表名称", placeholder: "例如：审计发现问题汇总", required: true },
-      { key: "nrows", type: "number", label: "行数", min: 1, max: 200, default: 3, required: true },
-      { key: "ncols", type: "number", label: "列数", min: 1, max: 30, default: 3, required: true },
-      { key: "after", type: "text", label: "插在哪张表后面", placeholder: "留空表示最后；例如 T02" },
-    ] },
+    "incremental-export": { group: "维护", title: "增量导出", description: "把 Word 中尚未登记的新表格、高亮标注和占位符追加到现有工作簿；既有行、编号与公式位置保持不变。", requires: ["docx", "excel"], dryRun: true, action: "增量导出", fields: [{ key: "backup", type: "checkbox", label: "保存前备份 Word 与 Excel", default: true }] },
     "sort-list": { group: "维护", title: "查看排序设置", description: "只读查看各表块当前排序及可选金额列。排序在同步到 Word 时应用。", query: true, requires: ["docx", "excel"], action: "查看排序" },
     "sort-set": { group: "维护", title: "设置表格排序", description: "按列名设置表块排序；表头与合计行保持不动，下一次同步时应用。", requires: ["docx", "excel"], action: "保存排序设置", fields: [
       { key: "code", type: "text", label: "表块编号", placeholder: "例如 T02", required: true },
@@ -581,12 +576,12 @@
     if (operation === "blank-scan") return renderBlankCandidates(data, "candidates")
     if (operation === "blank-batch-scan") return renderBatchCandidates(data)
     if (operation === "deleted-list") return renderDeletedList(data)
-    if (operation === "table-list") return tableResult(data, { code: "编号", name: "表名", bookmark: "书签", nrows: "行数", ncols: "列数", restore_after: "原位置" }, "add-table")
+    if (operation === "table-list") return tableResult(data, { code: "编号", name: "表名", bookmark: "书签", nrows: "行数", ncols: "列数", restore_after: "原位置" })
     if (operation === "sort-list") return renderSortList(data)
     if (operation === "backup-list") return renderBackups(data)
     if (operation === "diff") return tableResult(data, { code: "表块", name: "表名", kind: "类型", row: "行", col: "列", item: "位置 / 项目", old: "Word 原值", new: "Excel 新值" }, "diff-export")
     if (operation === "template-scan") return simpleValues(data, "占位符字段")
-    if (operation === "append-table") return el("div", "notice", `已插入新表块 ${data}。请在 Excel 中填写内容，再执行「同步到 Word」。`)
+    if (operation === "incremental-export") return el("div", "notice", "增量登记已完成；新增表格保存在「新增表格」，既有工作簿行未改动。")
     if (operation === "marks" || operation === "placeholders") return el("div", "notice", `已处理 ${data} 项。`)
     if (Array.isArray(data)) return tableResult(data, null)
     if (typeof data === "object") return tableResult([data], null)
@@ -618,11 +613,6 @@
       body.appendChild(tr)
     }
     table.appendChild(body); wrap.appendChild(table)
-    if (action === "add-table") {
-      const actions = el("div", "result-actions")
-      rows.forEach(row => { const button = el("button", "secondary-button", `在 ${row.code} 后插入新表`); button.type = "button"; button.addEventListener("click", () => switchOperation("append-table", { docx: getValue("docx"), excel: getValue("excel"), after: row.code })); actions.appendChild(button) })
-      wrap.appendChild(actions)
-    }
     if (action === "diff-export") {
       const button = el("button", "secondary-button", "导出差异清单到 Excel"); button.type = "button"
       button.addEventListener("click", () => switchOperation("diff-export", { docx: getValue("docx"), excel: getValue("excel") }))
@@ -696,7 +686,7 @@
         if (keep) item.keepCaptionFor.push(input.dataset.blankNo)
       })
       if (!grouped.size) return showError("请先勾选至少一张空白表。")
-      state.batchItems = [...grouped.values()].map(item => ({ ...item, pick: item.pick.join(","), keepCaptionFor: item.keepCaptionFor.join("") }))
+      state.batchItems = [...grouped.values()].map(item => ({ ...item, pick: item.pick.join(","), keepCaptionFor: item.keepCaptionFor.join(",") }))
       switchOperation("blank-batch-delete")
     })
     actions.append(all, next); box.appendChild(actions)
@@ -822,7 +812,7 @@
     } catch (error) { showError(error.message) }
   })
   $("cancel-confirmation").addEventListener("click", () => { state.pendingAction = null; $("confirmation").hidden = true })
-  $("confirm-run").addEventListener("click", () => { const args = state.pendingAction; if (args) execute(args) })
+  $("confirm-run").addEventListener("click", () => { const args = state.pendingAction; if (args) execute({ ...args, confirmed: true }); state.pendingAction = null })
   $("refresh-engine").addEventListener("click", refreshEngine)
   $("cancel-task").addEventListener("click", cancelTask)
   $("clear-logs").addEventListener("click", () => { state.logs = []; renderLogs() })

@@ -19,7 +19,7 @@ from .docx_bookmarks import (
     table_index_map_by_bookmark,
 )
 from .docx_grid import build_cellmap, cell_text
-from .valuefmt import display_text
+from .valuefmt import display_cell
 
 
 def _norm(text) -> str:
@@ -41,13 +41,14 @@ def table_signature(tbl) -> tuple:
 
 def block_signature(block: dict, ws) -> tuple:
     """工作簿表块的内容签名（数值按 Excel 显示文本比较）。"""
+    ws = block.get("_ws") or ws
     rows = block["grid_rows"]
     col0 = block.get("col0", 2)
     first_row = tuple(
-        _norm(display_text(ws.cell(rows[0], col0 + c).value, ws.cell(rows[0], col0 + c).number_format))
+        _norm(display_cell(ws.cell(rows[0], col0 + c)))
         for c in range(block["ncols"])
     ) if rows else ()
-    first_col = tuple(_norm(display_text(ws.cell(r, col0).value, ws.cell(r, col0).number_format)) for r in rows)
+    first_col = tuple(_norm(display_cell(ws.cell(r, col0))) for r in rows)
     return (block["ncols"], len(rows), first_row, first_col)
 
 

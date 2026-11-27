@@ -5,7 +5,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.hyperlink import Hyperlink
-from .config import FILL_ANCHOR, FILL_CODE_COLUMN, FONT_NAME, FONT_SIZE, MARK_HEADER, MARK_NO, MARK_YES, SHEET_NAME
+from .config import FILL_ANCHOR, FILL_CODE_COLUMN, FONT_NAME, FONT_SIZE, MARK_HEADER, MARK_NO, MARK_YES, SHEET_NAME, SHEET_NEW_TABLES
 from .console import log
 from .docx_grid import cell_alignment, explicit_borders, position_sides
 from .excel_totals import total_formula_cells
@@ -20,15 +20,20 @@ def make_border(sides: dict) -> Border:
     return Border(left=side("left"), right=side("right"), top=side("top"), bottom=side("bottom"))
 
 
-def export_workbook(infos: list[dict], docx_name: str, with_links: bool = True, totals_formula: bool = True) -> Workbook:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = SHEET_NAME
-    ws.column_dimensions["A"].width = 7
+def export_workbook(infos: list[dict], docx_name: str, with_links: bool = True, totals_formula: bool = True,
+                    *, wb=None, sheet_name: str = SHEET_NAME) -> Workbook:
+    wb = wb or Workbook()
+    if sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active if len(wb.worksheets) == 1 and wb.active.max_row == 1 and wb.active["A1"].value is None else wb.create_sheet()
+        ws.title = sheet_name
+    if ws.title == sheet_name and not ws.column_dimensions["A"].width:
+        ws.column_dimensions["A"].width = 7
     ws.freeze_panes = "A1"
 
     widths: dict[int, float] = {}
-    row = 1
+    row = (ws.max_row or 0) + 2 if ws.max_row and ws.max_row > 1 else 1
     defined: list[tuple[str, str]] = []
     formula_count = 0
 
@@ -118,7 +123,7 @@ def export_workbook(infos: list[dict], docx_name: str, with_links: bool = True, 
             anchor_cell = ws.cell(grid_start + r, 3 + c)
             anchor_cell.border = make_border({"top": top, "left": left, "bottom": bottom, "right": right})
 
-        defined.append((f"EX_{code}", f"'{SHEET_NAME}'!$C${grid_start}"))
+        defined.append((f"EX_{code}", f"'{sheet_name}'!$C${grid_start}"))
         row = grid_start + nrows + 1  # 表间空一行
 
     ws.column_dimensions["B"].width = 6

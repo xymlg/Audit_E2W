@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-import { emptySchema, operationSpecs, pathProperties, queryOperations, runOperations, runProperties, validateRunArgs } from "./catalog.mjs"
+import { emptySchema, formatProperties, operationSpecs, pathProperties, queryOperations, runOperations, runProperties, validateRunArgs } from "./catalog.mjs"
 
 const pluginRoot = path.dirname(fileURLToPath(import.meta.url))
 const manifest = JSON.parse(await readFile(path.join(pluginRoot, ".qoder-plugin", "plugin.json"), "utf8"))
@@ -44,12 +44,13 @@ const tools = [
   {
     name: "audit_query",
     title: "查询审计信息",
-    description: "只读扫描，不修改文件。调用前先用 audit_capabilities 核对 operation 和参数。operation 可选 blank-scan（空白表）、blank-batch-scan（批量空白表）、diff（Excel 与 Word 差异）、table-list（表块）、sort-list（排序）、template-scan（模板占位符）、deleted-list（可恢复表）、backup-list（备份历史）。返回 taskId 后用 audit_task_status 等待结果。",
+    description: "只读扫描，不修改文件。调用前先用 audit_capabilities 核对 operation 和参数。operation 可选 blank-scan（空白表）、blank-batch-scan（批量空白表）、diff（Excel 与 Word 差异）、table-list（表块）、sort-list（排序）、template-scan（模板占位符）、deleted-list（可恢复表）、backup-list（备份历史）、format-scan（格式预演）、format-heading-candidates（本地筛出的候选标题、表格前段落角色及附注边界，仅含有限上下文）。format-heading-candidates 不上传整篇报告或表格单元格，也不修改文件。返回 taskId 后用 audit_task_status 等待结果。",
     inputSchema: {
       type: "object",
       properties: {
         operation: { type: "string", enum: queryOperations, description: "只读操作名；先用 audit_capabilities 查看必填参数和示例" },
         ...pathProperties,
+        ...formatProperties,
       },
       required: ["operation"],
       additionalProperties: false,
@@ -60,12 +61,13 @@ const tools = [
   {
     name: "audit_run",
     title: "执行审计操作",
-    description: "执行 Word/Excel 审计操作。调用前先用 audit_capabilities 核对必填参数、默认值和预演支持。常见映射：Word 导出 Excel=export，Excel 同步回 Word=writeback，单模板生成新 Word=template-batch，批量同步=batch-writeback。Agent 必须先预演或差异检查，向用户说明将改动的文件，得到确认后再用 dryRun=false 执行；模板生成不得覆盖模板或源 Excel。返回 taskId 后用 audit_task_status 等待完成。",
+    description: "执行 Word/Excel 审计操作。调用前先用 audit_capabilities 核对必填参数、默认值和预演支持。常见映射：Word 导出 Excel=export，Excel 同步回 Word=writeback，单模板生成新 Word=template-batch，批量同步=batch-writeback，格式调整=format-apply。Agent 必须先预演或差异检查，向用户说明将改动的文件，得到确认后再用 dryRun=false、confirmed=true 执行；正式写操作缺少 confirmed=true 会被拒绝。只发送 format-heading-candidates 的本地筛选结果，不上传整篇报告；标题级别、表格前段落角色和附注边界均须由用户确认，且只应用直接排版，不改标题样式、大纲级别或目录。返回 taskId 后用 audit_task_status 等待完成。",
     inputSchema: {
       type: "object",
       properties: {
         operation: { type: "string", enum: runOperations, description: "执行操作名；先用 audit_capabilities 查看必填参数、默认值和预演支持" },
         ...runProperties,
+        ...formatProperties,
       },
       required: ["operation"],
       additionalProperties: false,
@@ -291,7 +293,9 @@ function summarizeTask(task) {
       ]))
     } else if (["batch-writeback", "fill-placeholders"].includes(task.operation)) {
       affectedFiles.push(...items.flatMap(item => [item.docx, item.excel]))
-    } else if (["export", "rejudge", "marks", "placeholders", "append-table", "sort-set", "sort-clear"].includes(task.operation)) {
+    } else if (task.operation === "incremental-export") {
+      affectedFiles.push(task.docx, excel)
+    } else if (["export", "rejudge", "marks", "placeholders", "sort-set", "sort-clear"].includes(task.operation)) {
       affectedFiles.push(excel)
       if (task.operation === "export") {
         outputFiles.push(excel)

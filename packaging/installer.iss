@@ -11,7 +11,7 @@
 ;       向导里可改到其他位置（如 D:\审计工具箱），装到 C:\Program Files 会需管理员且偏好文件写不进去。
 
 #define MyAppName "审计工具箱"
-#define MyAppVersion "1.11.1"
+#define MyAppVersion "1.11.3"
 #define MySrcDir "..\dist\" + MyAppName + "_v" + MyAppVersion
 #define MyExeName MyAppName + ".exe"
 
@@ -45,7 +45,12 @@ Name: "chs"; MessagesFile: "languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："
 
 [Files]
-Source: "{#MySrcDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 只装 PyInstaller 产物；运行时模板是 python-docx 必需资产，单独白名单保留。
+Source: "{#MySrcDir}\{#MyExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MySrcDir}\审计工具箱引擎.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MySrcDir}\使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MySrcDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.doc*,*.xls*,*.ppt*,*.pot*,*.pps*,*.ppam,*.one*,*.acc*,*.mdb,*.vs*,*.od?,*.pub,*.rtf,*.csv,~$*,.~lock*,*.lock,*.lck,*.tmp*,*.temp,*.pyc,*.pyo,*_backup*,*.git*,*cache*,*node_modules*,*.venv*,build\*,dist\*,.DS_Store,Thumbs.db,desktop.ini"
+Source: "{#MySrcDir}\_internal\docx\templates\default.docx"; DestDir: "{app}\_internal\docx\templates"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyExeName}"

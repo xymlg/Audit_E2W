@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 import datetime as _dt
+import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from .console import log
@@ -38,14 +40,16 @@ def list_backups(path: str | Path) -> list[dict]:
         stamp = _parse_stamp(mid)
         if stamp is None:
             continue
+        sequence = int(mid[16:]) if len(mid) > 15 and mid[15] == "_" and mid[16:].isdigit() else 0
         items.append({
             "file": f.name,
             "path": str(f),
             "time": stamp.strftime("%Y-%m-%d %H:%M:%S"),
             "stamp": stamp,
+            "sequence": sequence,
             "size": f.stat().st_size,
         })
-    items.sort(key=lambda x: x["stamp"], reverse=True)
+    items.sort(key=lambda x: (x["stamp"], x["sequence"]), reverse=True)
     return items
 
 
@@ -53,13 +57,25 @@ def restore_backup(backup: str | Path, target: str | Path) -> Path | None:
     """用历史版本覆盖目标文件；恢复前先把现状备份一次，返回该安全备份路径。"""
     backup = Path(backup)
     target = Path(target)
-    if not backup.exists():
+    if not backup.is_file():
         raise SyncError(f"备份文件不存在：{backup}")
     if not target.exists():
         raise SyncError(f"要恢复的文件不存在：{target}\n（可能已被移动或改名）")
+    if backup.suffix.lower() != target.suffix.lower():
+        raise SyncError("备份文件与目标文件类型必须一致")
+    if backup.resolve() not in {Path(item["path"]).resolve() for item in list_backups(target)}:
+        raise SyncError(f"该文件不是 {target.name} 的历史备份；请从备份列表中选择。")
     check_file_free(target, False)
     safety = backup_file(target)
-    shutil.copy2(backup, target)
+    fd, staged_name = tempfile.mkstemp(prefix=f".{target.stem}.restore.", suffix=target.suffix, dir=target.parent)
+    os.close(fd)
+    staged = Path(staged_name)
+    try:
+        shutil.copy2(backup, staged)
+        check_file_free(target, False)
+        os.replace(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
     log(f"[回滚] 已用 {backup.name} 恢复 {target.name}"
         + (f"（恢复前的现状已备份：{safety.name}，可再次回滚）" if safety else ""))
     return safety

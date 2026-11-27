@@ -8,7 +8,7 @@ import docx
 from openpyxl import load_workbook
 
 from ..align import apply_table_bookmarks, plan_table_bookmarks, split_bookmark_updates
-from ..config import DELETED_BOOKMARK, EXCEL_LINK_TEXT, NEW_BOOKMARK, SHEET_NAME
+from ..config import DELETED_BOOKMARK, EXCEL_LINK_TEXT, NEW_BOOKMARK, SHEET_NAME, SHEET_NEW_TABLES
 from ..console import log
 from ..docx_bookmarks import cleanup_excel_markers
 from ..docx_grid import body_items
@@ -19,7 +19,7 @@ from ..errors import SyncError
 from ..excel_blocks import carry_over_deleted_blocks, parse_blocks, read_recorded_bookmarks, rejudge_marks
 from ..excel_export import export_workbook
 from ..excel_marks import SHEET_MARKS, build_marks_sheet, read_previous_marks
-from ..fsops import backup_file, check_file_free, load_workbook_for_save, resolve_docx, resolve_xlsx
+from ..fsops import backup_file, check_file_free, load_workbook_for_save, resolve_docx, resolve_xlsx, save_docx_xlsx_transaction
 
 
 def _code_number(code: str) -> int:
@@ -66,9 +66,19 @@ def _load_previous_workbook(xlsx_path):
         return None, {}
     if SHEET_NAME not in workbook.sheetnames:
         return None, {}
-    ws = workbook[SHEET_NAME]
-    _, blocks = parse_blocks(ws)
-    return ws, blocks
+    blocks: dict[str, dict] = {}
+    for sheet_name in (SHEET_NAME, SHEET_NEW_TABLES):
+        if sheet_name not in workbook.sheetnames:
+            continue
+        ws = workbook[sheet_name]
+        _, sheet_blocks = parse_blocks(ws)
+        duplicate = set(sheet_blocks) & set(blocks)
+        if duplicate:
+            raise SyncError(f"工作簿中表编号重复：{'、'.join(sorted(duplicate))}。请修正后再导出。")
+        for code, block in sheet_blocks.items():
+            block["_ws"] = ws
+            blocks[code] = block
+    return workbook[SHEET_NAME], blocks
 
 
 def cmd_export(args) -> int:
@@ -158,7 +168,7 @@ def cmd_export(args) -> int:
     if ph_fields:
         ws_ph = init_placeholder_sheet(workbook)
         for field in ph_fields:
-            ws_ph.append([field, ph_values_old.get(field, "")])
+            ws_ph.append([field, ph_values_old.get(field, ""), "全量"])
         kept = sum(1 for f in ph_fields if ph_values_old.get(f))
         log(
             f"[占位符] 工作表「{VALUES_SHEET}」已写入 {len(ph_fields)} 个字段"
@@ -170,13 +180,16 @@ def cmd_export(args) -> int:
     backup = getattr(args, "backup", True)
     if not backup:
         log("[导出] 按选项不备份原文件（--no-backup / 界面取消勾选），直接覆盖。")
-    xlsx_backup = backup_file(xlsx_path) if backup else None
-    workbook.save(str(xlsx_path))
+    update_docx = bool(result["removed"] or result["inserted"] or created_marks or removed_markers)
+    backups = save_docx_xlsx_transaction(
+        docx_path=docx_path if update_docx else None,
+        doc=doc if update_docx else None,
+        xlsx_path=xlsx_path, wb=workbook, backup=backup,
+    )
+    xlsx_backup = backups.get(xlsx_path)
     log(f"[导出] 已写入 {xlsx_path.name}" + (f"（原文件已备份：{xlsx_backup.name}）" if xlsx_backup else ""))
-
-    if result["removed"] or result["inserted"] or created_marks or removed_markers:
-        docx_backup = backup_file(docx_path) if backup else None
-        doc.save(str(docx_path))
+    if update_docx:
+        docx_backup = backups.get(docx_path)
         log(f"[导出] 已更新 {docx_path.name}" + (f"（原文件已备份：{docx_backup.name}）" if docx_backup else ""))
     else:
         log("[导出] Word 中的书签已是目标状态，无需改动。")
@@ -192,25 +205,33 @@ def cmd_rejudge(args) -> int:
     if not args.dry_run:
         check_file_free(xlsx_path, args.force)
     workbook = load_workbook_for_save(xlsx_path)
-    if SHEET_NAME not in workbook.sheetnames:
+    sheets = [(name, workbook[name]) for name in (SHEET_NAME, SHEET_NEW_TABLES) if name in workbook.sheetnames]
+    if not sheets:
         raise SyncError(f"工作簿中找不到工作表“{SHEET_NAME}”，请确认该文件由本工具导出")
-    ws = workbook[SHEET_NAME]
-    _, blocks = parse_blocks(ws)
-    if not blocks:
+    total_changed = total_rows = total_blocks = 0
+    old_codes: list[str] = []
+    for sheet_name, ws in sheets:
+        _, sheet_blocks = parse_blocks(ws)
+        total_blocks += len(sheet_blocks)
+        if sheet_blocks:
+            stats = rejudge_marks(ws, sheet_blocks)
+            total_changed += stats["changed"]
+            total_rows += stats["rows"]
+            old_codes.extend(stats["old"])
+    if not total_blocks:
         raise SyncError("工作簿中没有表块，请先执行「导出表格到 Excel」")
-    log(f"读取工作簿：{xlsx_path.name}（表块 {len(blocks)} 个）")
-    stats = rejudge_marks(ws, blocks)
-    if stats["old"]:
+    log(f"读取工作簿：{xlsx_path.name}（{len(sheets)} 个表格工作表，{total_rows} 行）")
+    if old_codes:
         log(
-            f"[提醒] {'、'.join(stats['old'])} 为旧布局（没有标记列），无法重新判定；"
-            f"请执行一次「导出表格到 Excel」升级为新布局。"
+            f"[提醒] {'、'.join(old_codes)} 为旧布局（没有标记列），无法重新判定；"
+            "请执行一次「导出表格到 Excel」升级为新布局。"
         )
     prefix = "[判定·预演]" if args.dry_run else "[判定]"
-    log(f"{prefix} 重新判定 {stats['rows']} 行，标记变化 {stats['changed']} 行（表头/✓/✕；「已删」行保持原样）")
+    log(f"{prefix} 重新判定 {total_rows} 行，标记变化 {total_changed} 行（表头/✓/✕；「已删」行保持原样）")
     if args.dry_run:
         log("预演模式（--dry-run）：未写入任何文件。")
         return 0
-    if not stats["changed"]:
+    if not total_changed:
         log("标记与当前内容一致，工作簿无需写入。")
         return 0
     backup = getattr(args, "backup", True)

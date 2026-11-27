@@ -243,6 +243,9 @@ class WesyncApp(QMainWindow):
             exists = self.excel_path.exists() if self.excel_path else False
             suffix = "" if exists else "（工作簿尚未生成）"
             self.set_status(f"当前文件：{path.name}{suffix}")
+        page = self.stack.currentWidget()
+        if hasattr(page, "on_show"):
+            page.on_show()
 
     def set_excel(self, path: Path | None) -> None:
         self.excel_path = path

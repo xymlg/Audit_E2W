@@ -13,6 +13,7 @@ from .commands.blank_cmd import cmd_blank_tables
 from .commands.bookmark_cmd import cmd_bookmark
 from .commands.clear_cmd import cmd_clear_bookmarks
 from .commands.export_cmd import cmd_export
+from .commands.incremental_cmd import cmd_incremental_export
 from .commands.marks_cmd import cmd_marks, cmd_marks_sync
 from .commands.writeback_cmd import cmd_writeback
 from .console import log
@@ -63,6 +64,22 @@ def run_export(
     options = _options(docx, excel, dry_run, force, with_excel_links, backup)
     options.no_total_formulas = not totals_formula
     return cmd_export(options)
+
+
+def run_incremental_export(
+    docx: str | Path,
+    excel: str | Path | None = None,
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+    with_excel_links: bool = True,
+    totals_formula: bool = True,
+    backup: bool = True,
+) -> int:
+    """只登记 Word 中尚未锚定的表格、标注与占位符，不改既有工作簿行。"""
+    options = _options(docx, excel, dry_run, force, with_excel_links, backup)
+    options.no_total_formulas = not totals_formula
+    return cmd_incremental_export(options)
 
 
 def run_rejudge(
@@ -345,7 +362,7 @@ def list_table_blocks(docx: str | Path, excel: str | Path | None = None) -> list
     """只读列出工作簿里的表块（编号、表名、书签标记），供界面选择插入位置/恢复清单。"""
     from .fsops import load_workbook_for_save as load_workbook
 
-    from .config import SHEET_NAME
+    from .config import SHEET_NAME, SHEET_NEW_TABLES
     from .excel_blocks import parse_blocks
 
     docx_path = resolve_docx(str(docx))
@@ -353,9 +370,11 @@ def list_table_blocks(docx: str | Path, excel: str | Path | None = None) -> list
     if not xlsx_path.exists():
         return []
     wb = load_workbook(str(xlsx_path))
-    if SHEET_NAME not in wb.sheetnames:
-        return []
     order, blocks = parse_blocks(wb[SHEET_NAME])
+    if SHEET_NEW_TABLES in wb.sheetnames:
+        extra_order, extra_blocks = parse_blocks(wb[SHEET_NEW_TABLES])
+        order.extend(extra_order)
+        blocks.update(extra_blocks)
     result = []
     for code in order:
         block = blocks[code]
@@ -373,45 +392,10 @@ def list_table_blocks(docx: str | Path, excel: str | Path | None = None) -> list
     return result
 
 
-def run_append_table_block(
-    docx: str | Path,
-    excel: str | Path | None = None,
-    *,
-    name: str,
-    nrows: int,
-    ncols: int,
-    after: str | None = None,
-) -> str:
-    """在指定表块下面插入带「书签：新增」标记的新表块，返回表编号。
-
-    after 指定插到哪张表下面（如 "T02"），不指定时插到最后一张表下面；
-    后续表块整体下移，全部表块按上下顺序重新编号。Word 建表位置与 Excel 一致。
-    之后在 Excel 里填好内容，执行「同步到 Word」即会在 Word 里创建这张表。
-    """
-    from .fsops import load_workbook_for_save as load_workbook
-
-    from .excel_blocks import append_new_block
-
-    docx_path = resolve_docx(str(docx))
-    xlsx_path = resolve_xlsx(docx_path, None if excel is None else str(excel))
-    if not xlsx_path.exists():
-        raise SyncError(f"找不到工作簿：{xlsx_path}\n请先执行「导出表格到 Excel」生成工作簿。")
-    check_file_free(xlsx_path, False)
-    wb = load_workbook(str(xlsx_path))
-    code = append_new_block(wb, name, nrows, ncols, after=after)
-    backup = backup_file(xlsx_path)
-    wb.save(str(xlsx_path))
-    position = f"，插在 {after} 下面" if after else "，插在最后一张表下面"
-    log(f"[新表] 已插入 {code}「{name.strip()}」（{nrows}行×{ncols}列，书签：新增{position}；全部表块已按顺序重新编号）"
-        + (f"（原工作簿已备份：{backup.name}）" if backup else ""))
-    log("[新表] 请在 Excel 里填写该表块内容（首行为表头），再执行「同步到 Word」，新表会建在 Excel 里同一位置对应的 Word 表格之后。")
-    return code
-
-
 def _load_blocks(docx, excel):
     from .fsops import load_workbook_for_save as load_workbook
 
-    from .config import SHEET_NAME
+    from .config import SHEET_NAME, SHEET_NEW_TABLES
     from .excel_blocks import parse_blocks
 
     docx_path = resolve_docx(str(docx))
@@ -422,6 +406,16 @@ def _load_blocks(docx, excel):
     if SHEET_NAME not in wb.sheetnames:
         raise SyncError(f"工作簿中找不到工作表“{SHEET_NAME}”，请确认该文件由本工具导出")
     order, blocks = parse_blocks(wb[SHEET_NAME])
+    base_codes = set(order)
+    if SHEET_NEW_TABLES in wb.sheetnames:
+        extra_order, extra_blocks = parse_blocks(wb[SHEET_NEW_TABLES])
+        if set(extra_order) & base_codes:
+            raise SyncError("工作簿中「表格汇总」与「新增表格」存在重复表编号。")
+        order.extend(extra_order)
+        blocks.update(extra_blocks)
+    for code, block in blocks.items():
+        block["sheet_name"] = SHEET_NAME if code in base_codes else SHEET_NEW_TABLES
+        block["_ws"] = wb[block["sheet_name"]]
     return xlsx_path, wb, wb[SHEET_NAME], order, blocks
 
 
@@ -442,7 +436,7 @@ def list_table_sorts(docx: str | Path, excel: str | Path | None = None) -> list[
             {
                 "code": code,
                 "name": (block.get("meta", {}).get("name") or "").strip(),
-                "headers": block_headers(ws, block),
+                "headers": block_headers(block["_ws"], block),
                 "sort_column": setting[0] if setting else "",
                 "descending": setting[1] if setting else True,
                 "has_sort": setting is not None,
@@ -466,7 +460,7 @@ def set_table_sort(
     if code not in blocks:
         raise SyncError(f"工作簿中找不到表块 {code}")
     check_file_free(xlsx_path, False)
-    write_block_sort(ws, blocks[code], column, descending)
+    write_block_sort(blocks[code]["_ws"], blocks[code], column, descending)
     backup = backup_file(xlsx_path)
     wb.save(str(xlsx_path))
     log(f"[排序] {code}：已保存排序设置「{column} {'降序' if descending else '升序'}」"
@@ -481,7 +475,7 @@ def clear_table_sort(docx: str | Path, excel: str | Path | None = None, *, code:
     if code not in blocks:
         raise SyncError(f"工作簿中找不到表块 {code}")
     check_file_free(xlsx_path, False)
-    if clear_block_sort(ws, blocks[code]):
+    if clear_block_sort(blocks[code]["_ws"], blocks[code]):
         backup = backup_file(xlsx_path)
         wb.save(str(xlsx_path))
         log(f"[排序] {code}：已清除排序设置" + (f"（原工作簿已备份：{backup.name}）" if backup else ""))
@@ -727,11 +721,21 @@ def scan_report_format(
     *,
     profile_name: str | None = None,
     scope: dict | None = None,
+    heading_batch_id: str | None = None,
+    heading_levels: dict | None = None,
+    role_batch_id: str | None = None,
+    role_overrides: dict | None = None,
+    region_start_id: str | None = None,
 ) -> dict:
     """只读扫描格式调整方案：按样板或已存纯格式方案预演，不写任何文件。"""
     from .report_format import scan_report_format as scan
 
-    return scan(docx, template, profile_name=profile_name, scope=scope)
+    return scan(
+        docx, template, profile_name=profile_name, scope=scope,
+        heading_batch_id=heading_batch_id, heading_levels=heading_levels,
+        role_batch_id=role_batch_id, role_overrides=role_overrides,
+        region_start_id=region_start_id,
+    )
 
 
 def run_report_format(
@@ -742,11 +746,28 @@ def run_report_format(
     dry_run: bool = False,
     profile_name: str | None = None,
     scope: dict | None = None,
+    heading_batch_id: str | None = None,
+    heading_levels: dict | None = None,
+    role_batch_id: str | None = None,
+    role_overrides: dict | None = None,
+    region_start_id: str | None = None,
 ) -> dict:
     """按样板或已存纯格式方案生成副本；默认不覆盖原报告，也不改写原文件。"""
     from .report_format import run_report_format as run
 
-    return run(docx, template, output=output, dry_run=dry_run, profile_name=profile_name, scope=scope)
+    return run(
+        docx, template, output=output, dry_run=dry_run, profile_name=profile_name, scope=scope,
+        heading_batch_id=heading_batch_id, heading_levels=heading_levels,
+        role_batch_id=role_batch_id, role_overrides=role_overrides,
+        region_start_id=region_start_id,
+    )
+
+
+def scan_format_heading_candidates(docx: str | Path) -> dict:
+    """只返回本地筛出的候选标题、疑难角色和附注边界及有限上下文。"""
+    from .report_format import scan_heading_candidates
+
+    return scan_heading_candidates(docx)
 
 
 def list_format_profiles() -> list[dict]:
@@ -763,11 +784,11 @@ def load_format_profile(name: str):
     return load(name)
 
 
-def save_format_profile(template: str | Path, name: str) -> dict:
+def save_format_profile(template: str | Path, name: str, source: str | Path | None = None) -> dict:
     """从样板提取并保存纯格式参数，不保存报告文字、表格内容或样板路径。"""
     from .report_format import save_format_profile as save
 
-    return save(template, name)
+    return save(template, name, source)
 
 
 def delete_format_profile(name: str) -> dict:
